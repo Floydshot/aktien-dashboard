@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
+from io import BytesIO
 import json
 import math
 import multiprocessing as mp
@@ -27,6 +29,7 @@ import tempfile
 import time
 from typing import Any, Callable
 from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 
@@ -45,11 +48,17 @@ ETF_NUMERIC_FIELDS = ("distribution_yield_ttm", "distributions_per_share_ttm")
 ETF_SOURCE = "https://am.jpmorgan.com/content/dam/jpm-am-aem/americas/us/en/literature/fact-sheet/etfs/FS-JEPQ.PDF"
 TOKIO_TICKER = "8766.T"
 TOKIO_DIVIDEND_SOURCE = "https://www.tokiomarinehd.com/ir/stock/return.html"
+TOKIO_REPORT_INDEX = "https://www.tokiomarinehd.com/en/ir/download/{year}.html"
+TOKIO_SPLIT_FACTOR = 15
+TOKIO_PRE_SPLIT_ISSUED = 1_934_000_000
+TOKIO_POST_SPLIT_ISSUED = 29_010_000_000
+TOKIO_METRIC_VERSION = 1
+TOKIO_HIST_DIV_SOURCE = "https://www.tokiomarinehd.com/en/ir/download/Integrated_Report_2026_Print_e.pdf"
 TOKYO = ZoneInfo("Asia/Tokyo")
 
 
-def reference(name: str, ticker: str, cluster: str, hist_pe: float,
-              buy_trigger: str, current_pe: float, forward_pe: float,
+def reference(name: str, ticker: str, cluster: str, hist_pe: float | None,
+              buy_trigger: str, current_pe: float | None, forward_pe: float | None,
               *, hist_ps: float | None = None, ps_ratio: float | None = None,
               hist_div: float | None = None, div_yield: float | None = None,
               roe: float | None = None) -> dict[str, Any]:
@@ -92,7 +101,7 @@ PORTFOLIOS = [
         reference("Hannover Rück", "HNR1.DE", REINSURANCE, 14.3, "Forward P/E < 11,5x & Div.-Rendite > 4,5%", 11.7, 11.2, hist_div=4.2, div_yield=4.6, roe=22.0),
         reference("MS&AD Insurance", "8725.T", ASIA, 9.0, "Forward P/E < 10,5x oder Div.-Rendite > 3,6%", 8.8, 12.3, hist_div=3.5, div_yield=3.2, roe=17.5),
         reference("Allianz", "ALV.DE", EU_INSURANCE, 12.5, "Forward P/E < 11,5x oder Div.-Rendite > 5,5%", 13.9, 12.4, hist_div=5.2, div_yield=5.2, roe=16.0),
-        reference("Tokio Marine", "8766.T", ASIA, 12.6, "Rücksetzer auf Forward P/E 12x–13x abwarten", 18.3, 15.4, hist_div=3.2, div_yield=2.7, roe=13.0),
+        reference("Tokio Marine", "8766.T", ASIA, None, "Rücksetzer auf Forward P/E 12x–13x abwarten", None, None, hist_div=3.220123649, div_yield=None, roe=None),
         reference("DBS Group Holdings", "D05.SI", ASIA, 11.8, "Disziplin: Warten auf Forward P/E < 12,5x", 17.8, 16.6, hist_div=4.9, div_yield=4.3, roe=16.2),
         reference("Swiss Life", "SLHN.SW", EU_INSURANCE, 14.2, "Forward P/E < 14,5x oder Div.-Rendite > 5,2%", 19.5, 17.2, hist_div=5.1, div_yield=4.8, roe=15.0),
         dict(name="JPMorgan Nasdaq Equity Premium Income ETF", ticker="JEPQ",
@@ -150,12 +159,16 @@ def add_derived(stock: dict[str, Any], portfolio_id: str) -> None:
         stock["tranche"], stock["tranche_color"], stock["tranche_key"] = "ETF · separat bewerten", "slate", "unavailable"
         return
     stock["tranche"], stock["tranche_color"], stock["tranche_key"] = tranche_for(portfolio_id, stock.get("forward_pe"))
+    if stock.get("ticker") == TOKIO_TICKER and (
+            stock.get("field_sources", {}).get("forward_pe") != "live" or
+            stock.get("field_metadata", {}).get("forward_pe", {}).get("validation_version") != TOKIO_METRIC_VERSION):
+        stock["tranche"], stock["tranche_color"], stock["tranche_key"] = "Keine aktuelle IFRS-Prognose bestätigt", "slate", "unavailable"
     if raw is not None and raw <= 0:
         stock["warnings"].append("TTM-KGV ist nicht positiv; ein Bewertungsabschlag ist nicht sinnvoll interpretierbar.")
     if raw is not None and stock["chart_pe"] != raw:
         stock["warnings"].append("Nur der TTM-Chartbalken ist auf 260x begrenzt; Kachel und Tooltip zeigen den Rohwert.")
     if stock["tranche_key"] == "unavailable":
-        stock["warnings"].append("Forward-KGV fehlt oder ist nicht positiv; keine Tranche ableitbar.")
+        stock["warnings"].append("Keine frisch verifizierte IFRS-Basic-EPS-Prognose; keine Tranche ableitbar." if stock.get("ticker") == TOKIO_TICKER else "Forward-KGV fehlt oder ist nicht positiv; keine Tranche ableitbar.")
 
 
 def build_seed_data(now: datetime | None = None) -> dict[str, Any]:
@@ -176,6 +189,15 @@ def build_seed_data(now: datetime | None = None) -> dict[str, Any]:
                          field_updated_at={field: None for field in NUMERIC_FIELDS}, warnings=[INITIAL_WARNING])
             stock["field_sources"]["currency"] = "unavailable"
             stock["field_updated_at"]["currency"] = None
+            if stock["ticker"] == TOKIO_TICKER:
+                # Fixed references have their own explicit period and basis;
+                # the former JGAAP/unspecified historical KGV is ineligible.
+                stock["field_metadata"] = {
+                    "hist_pe": {"unavailable_reason": "Keine vergleichbare 5J-IFRS-Historie"},
+                    "hist_div": dict(provider="Tokio Marine IR", label="Dividendenreferenz 5J",
+                                     period="FY2021–FY2025", verified_at="2026-10-22",
+                                     source_url=TOKIO_HIST_DIV_SOURCE,
+                                     method="Arithmetisches Mittel der Jahresendrenditen FY2021–FY2025: DPS [85, 100, 123, 172, 218] / Jahresendkurse [2376, 2547, 4703, 5736, 7308] × 100 (einheitliche Aktienbasis); gedruckte Seite 74.")}
             if stock.get("asset_type") == "etf":
                 for field in ETF_NUMERIC_FIELDS:
                     stock[field] = None
@@ -195,6 +217,276 @@ def tokio_fiscal_year(stamp: str) -> int:
         raise ValueError("Dividenden-Zeitpunkt hat keine Zeitzone")
     current = current.astimezone(TOKYO)
     return current.year if current.month >= 4 else current.year - 1
+
+
+def _read_tokio_source(url: str, maximum: int) -> bytes:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != "www.tokiomarinehd.com" or not parsed.path.startswith("/en/ir/"):
+        raise ValueError("Nicht zugelassene Tokio-Marine-IR-Quelle")
+    with urlopen(Request(url, headers={"User-Agent": "ResearchStudio/1.0"}), timeout=8) as response:
+        body = response.read(maximum + 1)
+    if len(body) > maximum:
+        raise ValueError("IR-Quelldatei ist unerwartet groß")
+    return body
+
+
+class _TokioReportLinks(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "a":
+            for key, value in attrs:
+                if key == "href" and value:
+                    self.links.add(urljoin("https://www.tokiomarinehd.com/", value))
+
+
+def discover_tokio_reports(html: str, fiscal_year: int) -> list[tuple[int, str]]:
+    """Only summary reports, never JGAAP duplicates or supplemental files."""
+    parser = _TokioReportLinks()
+    parser.feed(html)
+    reports = []
+    for url in parser.links:
+        parsed = urlparse(url)
+        match = re.fullmatch(r"(IFRS_)?([1-4])Q_FY(20\d{2})_Summary_Report_e\.pdf", parsed.path.rsplit("/", 1)[-1], flags=re.I)
+        if (parsed.scheme != "https" or parsed.netloc != "www.tokiomarinehd.com" or
+                not parsed.path.startswith("/en/ir/") or not match or int(match[3]) != fiscal_year):
+            continue
+        # IFRS was introduced for FY2025. Its explicit IFRS report must take
+        # precedence over the separate FY2025 Japanese-GAAP summary report.
+        if fiscal_year <= 2025 and not match[1]:
+            continue
+        reports.append((int(match[2]), url))
+    return sorted(reports)
+
+
+_TOKIO_NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
+_TOKIO_MONTH = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+
+
+def parse_tokio_report(text: str, source_url: str, fiscal_year: int, retrieved_at: str,
+                       *, annual: bool, forecast_year: int | None = None) -> dict[str, dict[str, Any]]:
+    """Extract reported IFRS basic EPS/ROE, with an explicit share-count proof.
+
+    No Yahoo EPS, adjusted EPS or guessed split multiplier is accepted. A changed
+    report layout or an unknown issued-share basis therefore fails closed.
+    """
+    text = text.replace("\u2212", "-").replace("\u00a0", " ")
+    compact = re.sub(r"\s+", " ", text)
+    if not re.search(r"Summary of Consolidated Business Results of Tokio Marine Holdings, Inc\.\s+under IFRS", compact):
+        raise ValueError("Summary Report ist kein bestätigter IFRS-Konzernbericht")
+    if not re.search(r"Securit(?:y|ies) Code Number:\s*8766\b", compact):
+        raise ValueError("Wertpapierkennung des IR-Berichts ist nicht eindeutig")
+    dates = re.findall(rf"(?m)^({_TOKIO_MONTH} \d{{1,2}}, 20\d{{2}})\s*$", text)
+    if len(set(dates)) != 1:
+        raise ValueError("Veröffentlichungsdatum des IR-Berichts ist nicht eindeutig")
+    report_date = datetime.strptime(dates[0], "%B %d, %Y").date().isoformat()
+    issued = re.findall(rf"As of {_TOKIO_MONTH} \d{{1,2}}, 20\d{{2}}\s+([\d,]+) shares", compact)
+    if not issued or "Number of shares issued (common stock)" not in compact:
+        raise ValueError("Nachweis der Aktienbasis fehlt im IR-Bericht")
+    issued_shares = int(issued[0].replace(",", ""))
+    if issued_shares == TOKIO_PRE_SPLIT_ISSUED:
+        factor = TOKIO_SPLIT_FACTOR
+    elif issued_shares == TOKIO_POST_SPLIT_ISSUED:
+        factor = 1
+    else:
+        raise ValueError(f"Unbekannte Aktienbasis im IR-Bericht: {issued_shares}")
+    if factor == TOKIO_SPLIT_FACTOR and (
+            report_date >= "2026-10-01" or re.search(r"(?:stock|share)\s+split", compact, flags=re.I)):
+        # IAS 33 may restate EPS for a split after a quarter-end while the
+        # balance-date issued-share count still shows the old basis. A post-
+        # split Q2 publication therefore cannot safely be divided by 15 merely
+        # because its September share-count table is pre-split.
+        raise ValueError("EPS-Aktienbasis nach Split nicht eindeutig belegt; keine automatische weitere Division")
+    common = dict(provider="Tokio Marine IR", validation_version=TOKIO_METRIC_VERSION,
+                  source_url=source_url, retrieved_at=retrieved_at, report_date=report_date,
+                  report_fiscal_year=fiscal_year, currency="JPY", issued_shares=issued_shares,
+                  split_factor=factor)
+    metrics: dict[str, dict[str, Any]] = {}
+    if annual:
+        if not re.search(rf"under IFRS for the fiscal year ended March 31, {fiscal_year + 1}\b", compact):
+            raise ValueError("Geschäftsjahr des jährlichen IFRS-Berichts stimmt nicht überein")
+        table = re.search(r"Earnings per share\s*-\s*Basic(?P<table>[\s\S]{0,900}?)Total assets", text)
+        if not table or not re.search(r"Ratio of net income to\s*equity attributable to\s*owners of the parent", table["table"]):
+            raise ValueError("IFRS-Tabelle für Basic EPS und berichtete ROE fehlt")
+        rows = re.findall(rf"(?m)^Fiscal year {fiscal_year}\s+({_TOKIO_NUMBER})\s+({_TOKIO_NUMBER})\s+({_TOKIO_NUMBER})\s+({_TOKIO_NUMBER})\s*$", table["table"])
+        if len(rows) != 1:
+            raise ValueError("Jährliche IFRS-EPS-/ROE-Zeile ist nicht eindeutig")
+        raw_eps, _, roe, _ = [float(value.replace(",", "")) for value in rows[0]]
+        if raw_eps <= 0 or not -1000 <= roe <= 1000:
+            raise ValueError("Jährliche IFRS-Werte sind nicht sinnvoll interpretierbar")
+        period_end = f"{fiscal_year + 1}-03-31"
+        metrics["current_pe"] = dict(common, fact_type="ifrs_basic_eps_actual", fiscal_year=fiscal_year,
+                                     label=f"KGV FY{fiscal_year}", period=f"FY{fiscal_year} · IFRS", as_of=period_end,
+                                     period_end=period_end, raw_eps=raw_eps, normalized_eps=raw_eps / factor,
+                                     method=f"Aktueller JPY-Kurs / berichtetes IFRS Basic EPS FY{fiscal_year}; EPS anhand der ausgewiesenen Aktienzahl auf die aktuelle Aktienbasis normiert (÷ {factor}). Kein TTM- oder Adjusted-EPS-KGV.")
+        metrics["roe"] = dict(common, fact_type="ifrs_reported_roe", fiscal_year=fiscal_year,
+                              label=f"ROE FY{fiscal_year}", period=f"FY{fiscal_year} · IFRS", as_of=period_end,
+                              period_end=period_end, value=roe,
+                              method="Berichtete Ratio of net income to equity attributable to owners of the parent; keine Adjusted-ROE-Prognose.")
+    if forecast_year is not None:
+        if not re.search(rf"3\. Consolidated Business Forecasts for the fiscal year {forecast_year}\s*\(April 1, {forecast_year} to March 31, {forecast_year + 1}\)", compact):
+            raise ValueError("Keine eindeutig aktuelle ganzjährige IFRS-Ergebnisprognose")
+        candidates = []
+        for match in re.finditer(rf"(?m)^Fiscal year {forecast_year}\s+({_TOKIO_NUMBER})\s+({_TOKIO_NUMBER})\s+({_TOKIO_NUMBER})(?:\s+{_TOKIO_NUMBER})*\s*$", text):
+            heading = text[max(0, match.start() - 450):match.start()]
+            if "Earnings per share" in heading and "Basic" in heading and "Net income" in heading:
+                candidates.append(float(match[3].replace(",", "")))
+        if len(candidates) != 1 or candidates[0] <= 0:
+            raise ValueError("Basic-EPS-Prognose ist nicht eindeutig; Adjusted EPS wird nicht verwendet")
+        raw_eps = candidates[0]
+        metrics["forward_pe"] = dict(common, fact_type="ifrs_basic_eps_forecast", fiscal_year=forecast_year,
+                                     label=f"Forward FY{forecast_year}", period=f"FY{forecast_year} · IFRS · Prognose",
+                                     as_of=report_date, period_end=f"{forecast_year + 1}-03-31",
+                                     raw_eps=raw_eps, normalized_eps=raw_eps / factor,
+                                     method=f"Aktueller JPY-Kurs / offizielle IFRS Basic-EPS-Prognose FY{forecast_year}; Aktienbasis anhand der ausgewiesenen Aktienzahl geprüft (EPS ÷ {factor}). Kein Analystenkonsens oder Adjusted EPS.")
+    return metrics
+
+
+def fetch_tokio_issuer_metrics() -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Discover the latest annual and current-year forecast on issuer indices."""
+    from pypdf import PdfReader
+    stamp = iso_now()
+    year = tokio_fiscal_year(stamp)
+    metrics: dict[str, dict[str, Any]] = {}
+    warnings = []
+    discovered: dict[int, list[tuple[int, str]]] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        indices = {fy: pool.submit(_read_tokio_source, TOKIO_REPORT_INDEX.format(year=fy), 1_000_000) for fy in (year, year - 1)}
+        for fy, future in indices.items():
+            try:
+                html = future.result().decode("utf-8")
+                if not re.search(rf"<title>\s*FY{fy}\s*\|", html, flags=re.I) or "Summary report" not in html:
+                    raise ValueError("IR-Index ist keine bestätigte Geschäftsjahres-Berichtsseite")
+                discovered[fy] = discover_tokio_reports(html, fy)
+            except Exception as exc:
+                warnings.append(f"IR-Berichtsindex FY{fy}: {type(exc).__name__}: {str(exc)[:150]}")
+        annual_candidates = [url for quarter, url in discovered.get(year - 1, []) if quarter == 4]
+        latest = discovered.get(year, [])
+        latest_quarter = max((quarter for quarter, _ in latest), default=0)
+        forecast_candidates = [url for quarter, url in latest if quarter == latest_quarter]
+        if (not latest and year in discovered and
+                datetime.fromisoformat(stamp).astimezone(TOKYO).date().isoformat() < f"{year}-08-01"):
+            # Before the first quarterly report, the latest annual report carries
+            # the forecast for the current fiscal year. An unavailable/truncated
+            # current index, or an unexpectedly empty one after Q1 season, must
+            # never relabel an older annual forecast as freshly confirmed.
+            forecast_candidates = annual_candidates
+        jobs = {}
+        for label, urls in (("annual", annual_candidates), ("forecast", forecast_candidates)):
+            if len(urls) != 1:
+                warnings.append(f"IR-{label}: kein eindeutiger neuester IFRS Summary Report.")
+                continue
+            url = urls[0]
+            if url not in jobs:
+                jobs[url] = pool.submit(_read_tokio_source, url, 6_000_000)
+        for label, urls in (("annual", annual_candidates), ("forecast", forecast_candidates)):
+            if len(urls) != 1:
+                continue
+            url = urls[0]
+            try:
+                reader = PdfReader(BytesIO(jobs[url].result()))
+                if not 2 <= len(reader.pages) <= 200:
+                    raise ValueError("Unerwarteter Umfang des IFRS-Berichts")
+                # Normal extraction follows Form XObjects in these issuer PDFs;
+                # pypdf's layout mode can silently return empty text here.
+                text = "\n".join(page.extract_text() or "" for page in reader.pages[:2])
+                report_year = int(re.search(r"FY(20\d{2})_Summary_Report_e\.pdf$", url)[1])
+                parsed = parse_tokio_report(text, url, report_year, stamp, annual=label == "annual",
+                                            forecast_year=year if label == "forecast" else None)
+                metrics.update(parsed)
+            except Exception as exc:
+                warnings.append(f"IR-{label}: {type(exc).__name__}: {str(exc)[:180]}")
+    return metrics, warnings
+
+
+def valid_tokio_metric(value: Any, field: str, stamp: str) -> dict[str, Any] | None:
+    """Cached ratios from the former Yahoo/seed path are never eligible."""
+    if not isinstance(value, dict) or value.get("provider") != "Tokio Marine IR" or value.get("validation_version") != TOKIO_METRIC_VERSION:
+        return None
+    expected = {"current_pe": "ifrs_basic_eps_actual", "forward_pe": "ifrs_basic_eps_forecast", "roe": "ifrs_reported_roe"}
+    if value.get("fact_type") != expected.get(field) or value.get("currency") != "JPY":
+        return None
+    if not isinstance(value.get("source_url"), str):
+        return None
+    source = urlparse(value["source_url"])
+    if source.scheme != "https" or source.netloc != "www.tokiomarinehd.com" or not source.path.startswith("/en/ir/") or not re.search(r"[1-4]Q_FY20\d{2}_Summary_Report_e\.pdf$", source.path):
+        return None
+    fy = value.get("fiscal_year")
+    current_fy = tokio_fiscal_year(stamp)
+    if type(fy) is not int or (field == "forward_pe" and fy != current_fy) or (field != "forward_pe" and not current_fy - 2 <= fy < current_fy):
+        return None
+    try:
+        retrieved = datetime.fromisoformat(value.get("retrieved_at", ""))
+        report_date = datetime.strptime(value.get("report_date", ""), "%Y-%m-%d").date()
+        if retrieved.tzinfo is None or report_date > retrieved.astimezone(TOKYO).date() or value.get("period_end") != f"{fy + 1}-03-31":
+            return None
+    except (ValueError, TypeError):
+        return None
+    factor = value.get("split_factor")
+    issued = value.get("issued_shares")
+    if type(issued) is not int or type(factor) is not int:
+        return None
+    expected_factor = {TOKIO_PRE_SPLIT_ISSUED: TOKIO_SPLIT_FACTOR, TOKIO_POST_SPLIT_ISSUED: 1}.get(issued)
+    if expected_factor is None or factor != expected_factor:
+        return None
+    if factor == TOKIO_SPLIT_FACTOR and report_date.isoformat() >= "2026-10-01":
+        return None
+    if field == "roe":
+        roe = finite_number(value.get("value"))
+        if roe is None or not -1000 <= roe <= 1000:
+            return None
+    else:
+        raw, normalized = finite_number(value.get("raw_eps")), finite_number(value.get("normalized_eps"))
+        if raw is None or raw <= 0 or normalized is None or normalized <= 0 or not math.isclose(normalized, raw / factor, rel_tol=0, abs_tol=1e-9):
+            return None
+    return dict(value)
+
+
+def apply_tokio_issuer_metrics(stock: dict[str, Any], previous: dict[str, Any], payload: dict[str, Any],
+                               price: float | None, currency: str | None, stamp: str) -> None:
+    fresh_facts = payload.get("issuer_metrics") or {}
+    prior_facts = previous.get("field_metadata") or {}
+    metadata = stock.setdefault("field_metadata", {})
+    stock["hist_pe"] = None
+    stock["ps_ratio"] = None
+    stock["field_sources"]["ps_ratio"] = "unavailable"
+    stock["field_updated_at"]["ps_ratio"] = None
+    metadata["ps_ratio"] = {"unavailable_reason": "Yahoo-Aktienzahl/KUV nach Split inkonsistent; keine geprüfte IFRS-KUV-Basis"}
+    for field in ("current_pe", "forward_pe", "roe"):
+        stock[field] = None
+        stock["field_sources"][field] = "unavailable"
+        stock["field_updated_at"][field] = None
+        fresh = valid_tokio_metric(fresh_facts.get(field), field, stamp)
+        prior = valid_tokio_metric(prior_facts.get(field), field, stamp)
+        fact = fresh or prior
+        if not fact:
+            metadata[field] = {"unavailable_reason": "Keine eindeutig verifizierte aktuelle IFRS-Emittentenbasis; Yahoo- und Initialwerte verworfen"}
+            continue
+        metadata[field] = dict(fact)
+        source = "live" if fresh else "previous"
+        if field == "roe":
+            result = fact["value"]
+        elif price is not None and price > 0 and currency == "JPY":
+            result = price / fact["normalized_eps"]
+            metadata[field].update(calculation_price=price,
+                                   price_as_of=payload.get("info_retrieved_at") or payload.get("history_retrieved_at") or stamp)
+        else:
+            old = finite_number(previous.get(field))
+            old_price = finite_number(prior.get("calculation_price")) if prior else None
+            if not (prior and old is not None and old_price and old_price > 0 and
+                    previous.get("field_sources", {}).get(field) in {"live", "previous"} and
+                    math.isclose(old, old_price / prior["normalized_eps"], rel_tol=0, abs_tol=0.000001)):
+                continue
+            result = old
+            metadata[field] = dict(prior)
+            source = "previous"
+        stock[field] = round(result, 6)
+        stock["field_sources"][field] = source
+        stock["field_updated_at"][field] = fact["retrieved_at"] if source == "live" else metadata[field]["retrieved_at"]
+    if any(stock["field_sources"][field] == "previous" for field in ("current_pe", "forward_pe", "roe")):
+        stock["warnings"].append("IFRS-Kennzahlen verwenden zuletzt verifizierte Emittentenberichte; neuester Abruf nicht vollständig bestätigt.")
 
 
 class _DividendTableParser(HTMLParser):
@@ -464,7 +756,8 @@ def _fetch_worker(ticker: str, pipe: Any, attempts: int) -> None:
                             raise ValueError("Leere oder unvollständige Yahoo-Stammdaten")
                         pipe.send(dict(info=info, info_retrieved_at=iso_now()))
                     else:
-                        # Unadjusted Close shares the raw quote's price basis.
+                        # Yahoo Close is split-adjusted, without Adj Close's
+                        # dividend adjustment; it matches the current quote.
                         is_etf = ticker in ETF_TICKERS
                         history = security.history(period="1y", interval="1d", auto_adjust=False, actions=is_etf, timeout=12)
                         technicals, notes = calculate_technicals(history)
@@ -484,6 +777,14 @@ def _fetch_worker(ticker: str, pipe: Any, attempts: int) -> None:
                     pipe.send(dict(dividend_forecast=fetch_tokio_dividend_forecast()))
                 except Exception as exc:
                     pipe.send(dict(warnings=[f"Tokio Marine IR: {type(exc).__name__}: {str(exc)[:180]}"]))
+        if ticker == TOKIO_TICKER:
+            # Quotes and raw-Close technicals are sent before the slower issuer
+            # reports, so the overall watchdog cannot discard those successes.
+            try:
+                metrics, notes = fetch_tokio_issuer_metrics()
+                pipe.send(dict(issuer_metrics=metrics, warnings=notes))
+            except Exception as exc:
+                pipe.send(dict(warnings=[f"Tokio Marine IFRS: {type(exc).__name__}: {str(exc)[:180]}"]))
         pipe.send(dict(done=True))
     except Exception as exc:
         pipe.send(dict(warnings=[f"Abruf: {type(exc).__name__}: {str(exc)[:180]}"]))
@@ -550,6 +851,8 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
     price = quote_price or history_price
     is_etf = seed.get("asset_type") == "etf"
     is_tokio = seed.get("ticker") == TOKIO_TICKER
+    if is_tokio:
+        stock["field_metadata"] = {field: dict(value) for field, value in seed.get("field_metadata", {}).items()}
     dividend, dividend_warnings = (None, []) if is_etf or is_tokio else normalize_dividend_yield(info, price)
     stock["warnings"].extend(dividend_warnings)
     roe = finite_number(info.get("returnOnEquity"))
@@ -576,7 +879,7 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
     for field in fields:
         if is_etf and field in {"forward_pe", "ps_ratio", "roe", "div_yield"}:
             continue
-        if is_tokio and field == "div_yield":
+        if is_tokio and field in {"current_pe", "forward_pe", "ps_ratio", "roe", "div_yield"}:
             continue
         value = values[field]
         if field in {"price", "sma200"} and value is not None and value <= 0:
@@ -593,6 +896,7 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
             history_field = field in {"sma200", "rsi14", *ETF_NUMERIC_FIELDS} or (field == "price" and quote_price is None)
             stock["field_updated_at"][field] = payload.get("history_retrieved_at" if history_field else "info_retrieved_at") or stamp
     if is_tokio:
+        apply_tokio_issuer_metrics(stock, previous, payload, price, values["currency"], stamp)
         apply_tokio_dividend(stock, previous, payload, price, values["currency"], stamp)
     if is_etf:
         if stock.get("current_pe") is not None and stock["current_pe"] <= 0:
@@ -712,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
             import pandas  # noqa: F401
             import pytz  # noqa: F401
             import yfinance  # noqa: F401
+            import pypdf  # noqa: F401
             previous = load_previous(args.output)
             result = build_live_data(previous, fetcher=lambda ticker: fetch_ticker(ticker, args.ticker_timeout, args.attempts))
         atomic_write_json(args.output, result)
