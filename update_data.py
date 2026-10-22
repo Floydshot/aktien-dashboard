@@ -15,15 +15,18 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 import json
 import math
 import multiprocessing as mp
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
 from typing import Any, Callable
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 
@@ -40,6 +43,9 @@ NUMERIC_FIELDS = (
 )
 ETF_NUMERIC_FIELDS = ("distribution_yield_ttm", "distributions_per_share_ttm")
 ETF_SOURCE = "https://am.jpmorgan.com/content/dam/jpm-am-aem/americas/us/en/literature/fact-sheet/etfs/FS-JEPQ.PDF"
+TOKIO_TICKER = "8766.T"
+TOKIO_DIVIDEND_SOURCE = "https://www.tokiomarinehd.com/ir/stock/return.html"
+TOKYO = ZoneInfo("Asia/Tokyo")
 
 
 def reference(name: str, ticker: str, cluster: str, hist_pe: float,
@@ -180,6 +186,154 @@ def build_seed_data(now: datetime | None = None) -> dict[str, Any]:
             group["stocks"].append(stock)
         result["portfolios"].append(group)
     return result
+
+
+def tokio_fiscal_year(stamp: str) -> int:
+    """Tokio Marine's Japanese fiscal year runs from April through March."""
+    current = datetime.fromisoformat(stamp)
+    if current.tzinfo is None:
+        raise ValueError("Dividenden-Zeitpunkt hat keine Zeitzone")
+    current = current.astimezone(TOKYO)
+    return current.year if current.month >= 4 else current.year - 1
+
+
+class _DividendTableParser(HTMLParser):
+    """Read actual table cells, without relying on the issuer's CSS classes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tables: list[list[list[str]]] = []
+        self.depth = 0
+        self.rows: list[list[str]] = []
+        self.row: list[str] | None = None
+        self.cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "table":
+            if not self.depth:
+                self.rows = []
+            self.depth += 1
+        elif self.depth == 1:
+            if tag == "tr":
+                self.row = []
+            elif tag in {"td", "th"} and self.row is not None:
+                self.cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self.depth == 1 and self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.depth == 1:
+            if tag in {"td", "th"} and self.cell is not None and self.row is not None:
+                self.row.append(re.sub(r"\s+", "", "".join(self.cell)))
+                self.cell = None
+            elif tag == "tr" and self.row is not None:
+                self.rows.append(self.row)
+                self.row = None
+            elif tag == "table":
+                self.tables.append(self.rows)
+        if tag == "table" and self.depth:
+            self.depth -= 1
+
+
+def parse_tokio_dividend_forecast(html: str, retrieved_at: str) -> dict[str, Any]:
+    """Use the current, explicitly forecast JPY annual dividend from issuer IR."""
+    parser = _DividendTableParser()
+    parser.feed(html)
+    expected_year = tokio_fiscal_year(retrieved_at)
+    forecasts = []
+    for table in parser.tables:
+        heading = "".join(cell for row in table[:2] for cell in row)
+        if "配当金" not in heading or "円/株" not in heading or "年間" not in heading:
+            continue
+        for row in table:
+            match = re.fullmatch(r"(20\d{2})[（(]予想[）)]", row[0]) if row else None
+            if not match or int(match.group(1)) != expected_year or len(row) < 4:
+                continue
+            interim, year_end, annual = (finite_number(value.replace(",", "")) for value in row[1:4])
+            if (interim is None or year_end is None or annual is None or
+                    interim < 0 or year_end < 0 or annual <= 0 or
+                    not math.isclose(interim + year_end, annual, rel_tol=0, abs_tol=0.011)):
+                raise ValueError("IR-Dividendenprognose enthält widersprüchliche Jahresbeträge")
+            forecasts.append(dict(annual_rate=annual, fiscal_year=expected_year, currency="JPY",
+                                  source_url=TOKIO_DIVIDEND_SOURCE, retrieved_at=retrieved_at,
+                                  basis="forecast", interim_rate=interim, year_end_rate=year_end))
+    if len(forecasts) != 1:
+        raise ValueError("Keine eindeutige aktuelle JPY-Dividendenprognose in der Emittenten-Tabelle")
+    return forecasts[0]
+
+
+def fetch_tokio_dividend_forecast() -> dict[str, Any]:
+    # A Yahoo split mismatch must not be silently reintroduced by the next run.
+    # The issuer table is fetched afresh; no dividend amount is hardcoded here.
+    request = Request(TOKIO_DIVIDEND_SOURCE, headers={"User-Agent": "ResearchStudio/1.0"})
+    with urlopen(request, timeout=8) as response:
+        html = response.read(1_000_001)
+        if len(html) > 1_000_000:
+            raise ValueError("IR-Dividendenseite ist unerwartet groß")
+        html = html.decode("utf-8")
+    return parse_tokio_dividend_forecast(html, iso_now())
+
+
+def valid_tokio_dividend_forecast(value: Any, stamp: str) -> dict[str, Any] | None:
+    """Validate both freshly fetched and previously verified issuer metadata."""
+    if not isinstance(value, dict):
+        return None
+    annual = finite_number(value.get("annual_rate"))
+    if (annual is None or annual <= 0 or value.get("currency") != "JPY" or
+            value.get("basis") != "forecast" or value.get("source_url") != TOKIO_DIVIDEND_SOURCE or
+            type(value.get("fiscal_year")) is not int or value["fiscal_year"] != tokio_fiscal_year(stamp)):
+        return None
+    try:
+        retrieved_at = datetime.fromisoformat(value.get("retrieved_at", ""))
+        if retrieved_at.tzinfo is None:
+            return None
+    except (TypeError, ValueError):
+        return None
+    result = dict(value)
+    result["annual_rate"] = annual
+    return result
+
+
+def apply_tokio_dividend(stock: dict[str, Any], previous: dict[str, Any], payload: dict[str, Any],
+                         price: float | None, currency: str | None, stamp: str) -> None:
+    """Use issuer forecasts only; Yahoo's split-corrupted yield is ineligible."""
+    fresh = valid_tokio_dividend_forecast(payload.get("dividend_forecast"), stamp)
+    prior = valid_tokio_dividend_forecast(previous.get("dividend_forecast"), stamp)
+    forecast = fresh or prior
+    stock["div_yield"] = None
+    stock["field_sources"]["div_yield"] = "unavailable"
+    stock["field_updated_at"]["div_yield"] = None
+    if forecast:
+        stock["dividend_forecast"] = dict(forecast)
+    else:
+        stock.pop("dividend_forecast", None)
+    if forecast and price is not None and price > 0 and currency == "JPY":
+        stock["div_yield"] = round(forecast["annual_rate"] / price * 100, 6)
+        stock["field_sources"]["div_yield"] = "live" if fresh else "previous"
+        stock["field_updated_at"]["div_yield"] = forecast["retrieved_at"]
+        info = payload.get("info") or {}
+        quote_available = any((finite_number(info.get(field)) or 0) > 0 for field in ("currentPrice", "regularMarketPrice"))
+        price_stamp = payload.get("info_retrieved_at" if quote_available else "history_retrieved_at") or stamp
+        stock["dividend_forecast"].update(calculation_price=price, price_as_of=price_stamp)
+        if not fresh:
+            stock["warnings"].append("Dividendenrendite aus letzter verifizierter IR-Prognose und aktuellem JPY-Kurs; Prognose nicht neu abgerufen.")
+        return
+    # A missing/unverified current JPY quote may retain a verified earlier yield,
+    # but never the old Yahoo value or a yield from an expired fiscal forecast.
+    old_yield = finite_number(previous.get("div_yield"))
+    old_price = finite_number(prior.get("calculation_price")) if prior else None
+    if (prior and old_yield is not None and old_yield >= 0 and old_price and old_price > 0 and
+            previous.get("field_sources", {}).get("div_yield") in {"live", "previous"} and
+            math.isclose(old_yield, prior["annual_rate"] / old_price * 100, rel_tol=0, abs_tol=0.000001)):
+        stock["div_yield"] = old_yield
+        stock["field_sources"]["div_yield"] = "previous"
+        stock["field_updated_at"]["div_yield"] = prior["retrieved_at"]
+        stock["dividend_forecast"] = dict(prior)
+        stock["warnings"].append("Kein aktueller bestätigter JPY-Kurs; letzte verifizierte IR-Dividendenrendite beibehalten.")
+    else:
+        stock["warnings"].append("Keine verifizierte aktuelle IR-Dividendenprognose mit passendem JPY-Kurs; Yahoo-Dividendenfeld wegen Split-Unstimmigkeit nicht übernommen.")
 
 
 def normalize_dividend_yield(info: dict[str, Any], price: float | None) -> tuple[float | None, list[str]]:
@@ -325,6 +479,11 @@ def _fetch_worker(ticker: str, pipe: Any, attempts: int) -> None:
                         pipe.send(dict(warnings=[f"{endpoint}: {type(exc).__name__}: {str(exc)[:180]}"]))
                     else:
                         time.sleep(min(2 ** attempt, 4))
+            if endpoint == "info" and ticker == TOKIO_TICKER:
+                try:
+                    pipe.send(dict(dividend_forecast=fetch_tokio_dividend_forecast()))
+                except Exception as exc:
+                    pipe.send(dict(warnings=[f"Tokio Marine IR: {type(exc).__name__}: {str(exc)[:180]}"]))
         pipe.send(dict(done=True))
     except Exception as exc:
         pipe.send(dict(warnings=[f"Abruf: {type(exc).__name__}: {str(exc)[:180]}"]))
@@ -390,7 +549,8 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
     history_price = finite_number(technicals.get("history_price"))
     price = quote_price or history_price
     is_etf = seed.get("asset_type") == "etf"
-    dividend, dividend_warnings = (None, []) if is_etf else normalize_dividend_yield(info, price)
+    is_tokio = seed.get("ticker") == TOKIO_TICKER
+    dividend, dividend_warnings = (None, []) if is_etf or is_tokio else normalize_dividend_yield(info, price)
     stock["warnings"].extend(dividend_warnings)
     roe = finite_number(info.get("returnOnEquity"))
     values = dict(current_pe=finite_number(info.get("trailingPE")), forward_pe=finite_number(info.get("forwardPE")),
@@ -416,6 +576,8 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
     for field in fields:
         if is_etf and field in {"forward_pe", "ps_ratio", "roe", "div_yield"}:
             continue
+        if is_tokio and field == "div_yield":
+            continue
         value = values[field]
         if field in {"price", "sma200"} and value is not None and value <= 0:
             value = None
@@ -430,6 +592,8 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
             stock["field_sources"][field] = "live"
             history_field = field in {"sma200", "rsi14", *ETF_NUMERIC_FIELDS} or (field == "price" and quote_price is None)
             stock["field_updated_at"][field] = payload.get("history_retrieved_at" if history_field else "info_retrieved_at") or stamp
+    if is_tokio:
+        apply_tokio_dividend(stock, previous, payload, price, values["currency"], stamp)
     if is_etf:
         if stock.get("current_pe") is not None and stock["current_pe"] <= 0:
             stock["current_pe"] = None
