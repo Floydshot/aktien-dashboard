@@ -88,6 +88,7 @@
     @media(max-width:700px) { .topbar { gap: 10px; } .theme-toggle { padding: 0 8px; gap: 5px; height: 31px; font-size: 10px; } }
     @media(max-width:420px) { .topbar { flex-wrap: wrap; } .brand { flex: 1 1 175px; } }
     @media print { .theme-toggle { display: none; } .trigger-text,.technical-value { color: #111; } }
+    .data-links { flex: none; } .metric-source[href] { text-underline-offset: 2px; }
   </style>
 </head>
 <body>
@@ -99,7 +100,7 @@
     <main>
       <div class="page-heading">
         <div><div class="heading-line"><h1>research studio</h1></div><p class="subtitle">buy the right shit at the right time</p></div>
-        <div class="update-area"><div class="update-copy"><div class="status-line" role="status"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span id="status-text">Daten werden geladen</span></div><div id="timestamp" class="timestamp">Datenquelle: Yahoo Finance · yfinance</div></div><button type="button" id="reload" class="reload" aria-label="Daten erneut laden" aria-busy="false" title="Lädt den neuesten veröffentlichten Datenstand erneut."><svg class="reload-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M16.2 7A6.5 6.5 0 1 0 16 13M16.2 3.5V7H12.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="reload-progress" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="reload-label">Aktualisieren</span></button></div>
+        <div class="update-area"><div class="update-copy"><div class="status-line" role="status"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span id="status-text">Daten werden geladen</span></div><div id="timestamp" class="timestamp">Datenquellen: Yahoo Finance · Emittenten-IR</div></div><button type="button" id="reload" class="reload" aria-label="Daten erneut laden" aria-busy="false" title="Lädt den neuesten veröffentlichten Datenstand erneut."><svg class="reload-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M16.2 7A6.5 6.5 0 1 0 16 13M16.2 3.5V7H12.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="reload-progress" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="reload-label">Aktualisieren</span></button></div>
       </div>
       <div id="loading" class="loading-panel" aria-live="polite"><span class="loading-text">Bewertungsdaten werden geladen …</span><div class="skeleton" aria-hidden="true"></div><div class="skeleton tall" aria-hidden="true"></div></div>
       <div id="error" class="error-panel" role="alert" hidden></div>
@@ -114,7 +115,7 @@
           <div id="cards" class="cards" aria-live="polite" aria-label="Aktien, ETFs und Nachkauf-Indikatoren"></div>
           <div id="empty" class="empty" hidden><strong>Keine passenden Werte</strong><p>Für diese Kombination aus Cluster und Suche gibt es keine Treffer.</p><button type="button" id="reset-filters">Filter zurücksetzen</button></div>
         </section>
-        <footer class="footer"><p>Aktien-Tranchen folgen der festen Forward-P/E-Regel; individuelle Nachkauf-Indikatoren werden separat angezeigt. JEPQ wird als ETF separat betrachtet: Fonds-KGV und Ausschüttungen sind keine Unternehmenskennzahlen. Quellenstatus steht an jeder Kennzahl.</p><a href="https://finance.yahoo.com/" target="_blank" rel="noopener noreferrer">Daten: Yahoo Finance ↗</a></footer>
+        <footer class="footer"><p>Aktien-Tranchen folgen der festen Forward-P/E-Regel; individuelle Nachkauf-Indikatoren werden separat angezeigt. JEPQ wird als ETF separat betrachtet: Fonds-KGV und Ausschüttungen sind keine Unternehmenskennzahlen. Quellenstatus steht an jeder Kennzahl.</p><span class="data-links"><a href="https://finance.yahoo.com/" target="_blank" rel="noopener noreferrer">Yahoo Finance ↗</a> · <a href="https://www.tokiomarinehd.com/ir/stock/return.html" target="_blank" rel="noopener noreferrer">Tokio Marine IR ↗</a></span></footer>
       </div>
       <p id="announcer" class="sr-only" aria-live="polite"></p>
     </main>
@@ -186,11 +187,24 @@
       return stock.source_status === 'live' ? 'live' : stock.source_status === 'initial' ? 'initial' : 'previous';
     }
     const sourceText = { live: 'Yahoo-Abruf', initial: 'Initialwert', previous: 'Vorwert', unavailable: 'nicht verfügbar' };
+    function dividendForecast(stock) {
+      const forecast = stock.dividend_forecast;
+      const urls = ['https://www.tokiomarinehd.com/ir/stock/return.html', 'https://www.tokiomarinehd.com/en/ir/stock/return.html'];
+      return stock.ticker === '8766.T' && forecast && forecast.basis === 'forecast' && forecast.currency === 'JPY' && positive(forecast.annual_rate) !== null && urls.includes(forecast.source_url) && ['live', 'previous'].includes(source(stock, 'div_yield')) && number(stock.div_yield) !== null ? forecast : null;
+    }
+    function fieldSourceText(stock, field) {
+      const status = source(stock, field);
+      return field === 'div_yield' && dividendForecast(stock) ? status === 'previous' ? 'IR-Vorwert' : 'Tokio Marine IR' : sourceText[status];
+    }
+
     function dateText(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? null : new Intl.DateTimeFormat('de-DE', { timeZone: 'Europe/Berlin', dateStyle: 'medium', timeStyle: 'short' }).format(date); }
     function provenance(stock, field) {
       const status = source(stock, field);
       const time = stock.field_updated_at && stock.field_updated_at[field] || stock.field_as_of && stock.field_as_of[field] || stock.as_of;
-      return sourceText[status] + (time && status !== 'initial' && dateText(time) ? ' · ' + dateText(time) + ' (Berlin)' : '');
+      const forecast = field === 'div_yield' ? dividendForecast(stock) : null;
+      const calculationPrice = forecast && positive(forecast.calculation_price) !== null ? forecast.calculation_price : stock.price;
+      const detail = forecast ? ' · Prognose FY' + forecast.fiscal_year + ': ' + fmt(forecast.annual_rate, 2) + ' JPY je Aktie/Jahr ÷ Kurs ' + fmt(calculationPrice, 2) + ' JPY × 100' + (forecast.price_as_of && dateText(forecast.price_as_of) ? ' (Kursstand: ' + dateText(forecast.price_as_of) + ')' : '') + ' · Quelle: ' + forecast.source_url : '';
+      return fieldSourceText(stock, field) + (time && status !== 'initial' && dateText(time) ? ' · ' + dateText(time) + ' (Berlin)' : '') + detail;
     }
     function mode() {
       const given = state.data.data_mode;
@@ -205,7 +219,7 @@
     }
     function status() {
       const current = mode();
-      $('status-text').textContent = { live: 'Aktuell · Yahoo Finance', partial: 'Teilweise aktualisiert', stale: 'Veraltet · letzte verfügbare Daten', initial: 'Initialwerte · noch kein Live-Abruf' }[current];
+      $('status-text').textContent = { live: 'Aktuell · Marktdaten + IR', partial: 'Teilweise aktualisiert', stale: 'Veraltet · letzte verfügbare Daten', initial: 'Initialwerte · noch kein Live-Abruf' }[current];
       $('status-dot').className = 'status-dot' + (current === 'live' ? ' live' : current === 'stale' ? ' stale' : '');
       $('timestamp').textContent = (current === 'initial' ? 'Initialisiert: ' : 'Last updated: ') + (state.data.last_updated || 'Zeitpunkt unbekannt');
       const notice = $('data-notice'); notice.replaceChildren();
@@ -247,7 +261,9 @@
       const val = el('span', 'metric-value' + (highlight ? ' highlight' : ''), value);
       val.title = reference ? 'Feste Nutzervorgabe (5J/10J); Zeitraum nicht unabhängig verifiziert.' : provenance(stock, field) + (field.includes('pe') && number(stock[field]) !== null ? ' · Rohwert: ' + fmt(stock[field], 2) : '');
       cell.append(val);
-      const status = reference ? 'reference' : source(stock, field); const labelNode = el('span', 'metric-source ' + (reference ? 'reference' : status === 'live' ? 'fresh' : status === 'unavailable' ? '' : 'fallback'), reference ? 'Vorgabe (5J/10J)' : sourceText[status]);
+      const status = reference ? 'reference' : source(stock, field), forecast = !reference && field === 'div_yield' ? dividendForecast(stock) : null;
+      const labelNode = el(forecast ? 'a' : 'span', 'metric-source ' + (reference ? 'reference' : status === 'live' ? 'fresh' : status === 'unavailable' ? '' : 'fallback'), reference ? 'Vorgabe (5J/10J)' : fieldSourceText(stock, field));
+      if (forecast) { labelNode.href = forecast.source_url; labelNode.target = '_blank'; labelNode.rel = 'noopener noreferrer'; labelNode.addEventListener('click', event => event.stopPropagation()); labelNode.addEventListener('keydown', event => event.stopPropagation()); }
       labelNode.title = val.title; cell.append(labelNode); return cell;
     }
     function select(ticker, fromChart = false) {
@@ -277,7 +293,7 @@
           metrics.append(metricCell(stock, 'Fonds-KGV', peText(stock.current_pe), 'current_pe'), metricCell(stock, 'Rendite 12M', percent(stock.distribution_yield_ttm), 'distribution_yield_ttm', false, true), metricCell(stock, 'Auszahl./Anteil', number(stock.distributions_per_share_ttm) === null ? '—' : fmt(stock.distributions_per_share_ttm, 2) + (stock.currency ? ' ' + stock.currency : ''), 'distributions_per_share_ttm'), metricCell(stock, 'Kurs', number(stock.price) === null ? '—' : fmt(stock.price, 2), 'price'));
           card.append(metrics, el('p', 'fund-note', 'Ausschüttungen der letzten 12 Monate ÷ aktueller Kurs. Fonds-KGV: Bewertung der enthaltenen Aktien; keine historische Referenz hinterlegt.'));
         } else {
-          metrics.append(metricCell(stock, 'TTM P/E', peText(stock.current_pe), 'current_pe'), metricCell(stock, 'Hist. P/E', peText(stock.hist_pe), 'hist_pe', true), metricCell(stock, 'Forward P/E', peText(stock.forward_pe), 'forward_pe', false, true), state.portfolio === 'tech' ? metricCell(stock, 'P/S', number(stock.ps_ratio) === null ? '—' : fmt(stock.ps_ratio) + '×', 'ps_ratio') : metricCell(stock, 'Div.-Rendite', percent(stock.div_yield), 'div_yield')); card.append(metrics);
+          metrics.append(metricCell(stock, 'TTM P/E', peText(stock.current_pe), 'current_pe'), metricCell(stock, 'Hist. P/E', peText(stock.hist_pe), 'hist_pe', true), metricCell(stock, 'Forward P/E', peText(stock.forward_pe), 'forward_pe', false, true), state.portfolio === 'tech' ? metricCell(stock, 'P/S', number(stock.ps_ratio) === null ? '—' : fmt(stock.ps_ratio) + '×', 'ps_ratio') : metricCell(stock, dividendForecast(stock) ? 'Div. (Prognose)' : 'Div.-Rendite', percent(stock.div_yield), 'div_yield')); card.append(metrics);
           const valuation = el('div', 'valuation-row'); const spread = positive(stock.current_pe) !== null && positive(stock.hist_pe) !== null ? (Number(stock.current_pe) / Number(stock.hist_pe) - 1) * 100 : null; const spreadNode = el('span', 'spread' + (spread === null ? '' : spread < 0 ? ' discount' : ' premium'), spread === null ? 'P/E-Abstand nicht verfügbar' : signedPercent(spread) + ' TTM vs. Referenz'); spreadNode.title = 'Vergleich des TTM-P/E mit der festen historischen Nutzervorgabe; kein Kurspotenzial.'; valuation.append(spreadNode);
           const companion = state.portfolio === 'tech' ? 'Hist. P/S ' + (number(stock.hist_ps) === null ? '—' : fmt(stock.hist_ps) + '×') : 'ROE ' + percent(stock.roe); const companionNode = el('span', '', companion); companionNode.title = state.portfolio === 'tech' ? 'Feste Nutzervorgabe (5J/10J)' : provenance(stock, 'roe'); if (state.portfolio === 'value') companionNode.append(el('span', 'technical-source', '· ' + sourceText[source(stock, 'roe')])); valuation.append(companionNode); card.append(valuation);
         }
@@ -291,7 +307,7 @@
       $('details-count').textContent = ' · ' + state.visible.length + ' von ' + portfolio().stocks.length;
       $('empty').hidden = !!state.visible.length;
     }
-    function chartLabel(stock, series) { return isETF(stock) && series.field === 'div_yield' ? 'Ausschüttungsrendite (12M)' : isETF(stock) && series.field === 'current_pe' ? 'Fonds-KGV' : series.label; }
+    function chartLabel(stock, series) { if (series.field === 'div_yield' && dividendForecast(stock)) return 'Dividendenrendite (Prognose FY' + dividendForecast(stock).fiscal_year + ')'; return isETF(stock) && series.field === 'div_yield' ? 'Ausschüttungsrendite (12M)' : isETF(stock) && series.field === 'current_pe' ? 'Fonds-KGV' : series.label; }
     function chartText(stock, field) { const raw = metricValue(stock, field); return field.includes('pe') ? peText(raw) : state.portfolio === 'value' && state.metric === 'secondary' ? percent(raw) : fmt(raw) + (number(raw) === null ? '' : '×'); }
     function chartSeries(colors = chartPalette()) {
       if (state.metric === 'pe') return [ { label: 'Aktuelles P/E (TTM)', field: 'current_pe', color: colors.current, reference: false }, { label: 'Hist. P/E · Vorgabe', field: 'hist_pe', color: colors.reference, reference: true }, { label: 'Forward P/E', field: 'forward_pe', color: colors.forward, reference: false } ];
