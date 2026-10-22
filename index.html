@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#0b1119">
-  <meta name="description" content="floyd projects — numbers, signals, actions. Tech Stonks und Value Stonks mit Aktien und JEPQ.">
-  <title>floyd projects · Research workspace</title>
+  <meta name="description" content="floyd projects — to the moon. Tech Stonks und Value Stonks mit Aktien und JEPQ.">
+  <title>floyd projects · research workspace</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>if (window.tailwind) { window.tailwind.config = { corePlugins: { preflight: false } }; }</script>
   <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js" onerror="window.chartLoadFailed=true"></script>
@@ -26,7 +26,7 @@
     </header>
     <main>
       <div class="page-heading">
-        <div><div class="heading-line"><h1>Research workspace</h1></div><p class="subtitle">numbers, signals, actions</p></div>
+        <div><div class="heading-line"><h1>research workspace</h1></div><p class="subtitle">to the moon</p></div>
         <div class="update-area"><div class="update-copy"><div class="status-line" role="status"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span id="status-text">Daten werden geladen</span></div><div id="timestamp" class="timestamp">Datenquelle: Yahoo Finance · yfinance</div></div><button type="button" id="reload" class="reload" aria-label="Daten erneut laden" aria-busy="false" title="Lädt den neuesten veröffentlichten Datenstand erneut."><svg class="reload-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M16.2 7A6.5 6.5 0 1 0 16 13M16.2 3.5V7H12.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><svg class="reload-progress" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M17 10a7 7 0 0 0-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="reload-label">Aktualisieren</span></button></div>
       </div>
       <div id="loading" class="loading-panel" aria-live="polite"><span class="loading-text">Bewertungsdaten werden geladen …</span><div class="skeleton" aria-hidden="true"></div><div class="skeleton tall" aria-hidden="true"></div></div>
@@ -129,7 +129,9 @@
       return result.sort((a, b) => { let result = 0; if (state.sort === 'forward') result = compareNumber(a, b, 'forward_pe'); else if (state.sort === 'secondary') result = compareNumber(a, b, state.portfolio === 'tech' ? 'ps_ratio' : 'div_yield', state.portfolio === 'value'); return result || String(a.name).localeCompare(String(b.name), 'de'); });
     }
     function renderFilters() {
-      const clusters = ['Alle', ...new Set(portfolio().stocks.map(stock => stock.cluster))];
+      const available = new Set(portfolio().stocks.map(stock => stock.cluster));
+      const ordered = [...new Set([...(portfolio().cluster_order || []), ...available])].filter(name => available.has(name));
+      const clusters = ['Alle', ...ordered];
       const container = $('clusters'); container.replaceChildren();
       clusters.forEach(name => { const button = el('button', 'cluster', name); button.type = 'button'; button.setAttribute('aria-pressed', String(state.cluster === name)); button.addEventListener('click', () => { state.cluster = name; renderFilters(); render(); }); container.append(button); });
       $('secondary-sort').textContent = state.portfolio === 'tech' ? 'P/S aufsteigend' : 'Rendite absteigend';
@@ -202,9 +204,9 @@
       return state.portfolio === 'tech' ? [ { label: 'Aktuelles P/S', field: 'ps_ratio', color: '#43d5b3', reference: false }, { label: 'Hist. P/S · Vorgabe', field: 'hist_ps', color: '#607487', reference: true } ] : [ { label: 'Dividende / Ausschüttung', field: 'div_yield', color: '#43d5b3', reference: false }, { label: 'Hist. Div.-Rendite · Vorgabe', field: 'hist_div', color: '#607487', reference: true } ];
     }
     function chartValue(stock, field) {
-      if (field === 'current_pe' && String(stock.cluster).includes('SaaS') && number(stock[field]) !== null && Number(stock[field]) < 0) return positive(stock.chart_pe) || 260;
+      if (field === 'current_pe' && ['NOW', 'PANW', 'CRWD', 'NET'].includes(stock.ticker) && number(stock[field]) !== null && Number(stock[field]) < 0) return positive(stock.chart_pe) || 260;
       const value = field.includes('pe') ? positive(stock[field]) : number(metricValue(stock, field)); if (value === null) return null;
-      if (field === 'current_pe' && String(stock.cluster).includes('SaaS')) { const capped = positive(stock.chart_pe); return capped !== null ? capped : value > 280 ? 260 : value; }
+      if (field === 'current_pe' && ['NOW', 'PANW', 'CRWD', 'NET'].includes(stock.ticker)) { const capped = positive(stock.chart_pe); return capped !== null ? capped : value > 280 ? 260 : value; }
       return value;
     }
     function renderFallback(series) {
