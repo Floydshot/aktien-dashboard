@@ -4,7 +4,7 @@
 Run ``python update_data.py`` for Yahoo Finance data, or add ``--seed`` for
 the exact supplied starting values without any network or third-party import.
 Historical multiples and buy_trigger strings below are user-supplied fixed
-references, not independently verified five/ten-year historical calculations.
+references unless separate issuer evidence and calculation metadata are supplied.
 Stock tranches implement the requested forward-P/E thresholds, not the free-text
 company-specific triggers. ETFs are assessed separately without stock thresholds.
 All missing prices/technicals remain JSON null.
@@ -36,8 +36,9 @@ from zoneinfo import ZoneInfo
 BERLIN = ZoneInfo("Europe/Berlin")
 REFERENCE_WARNING = (
     "Historische Multiples, Dividendenreferenzen und Nachkauf-Indikatoren sind "
-    "vorgegebene, nicht unabhängig geprüfte Referenzwerte; der 5J/10J-Zeitraum "
-    "ist nicht je Aktie belegt. Tranchen folgen nur den Forward-KGV-Schwellen."
+    "vorgegebene, nicht unabhängig geprüfte Referenzwerte, sofern nicht separat "
+    "belegt; der 5J/10J-Zeitraum ist nicht je Aktie belegt. "
+    "Tranchen folgen nur den Forward-KGV-Schwellen."
 )
 INITIAL_WARNING = "Startwerte aus dem Briefing; keine aktuellen Yahoo-Finance-Daten."
 NUMERIC_FIELDS = (
@@ -54,7 +55,27 @@ TOKIO_PRE_SPLIT_ISSUED = 1_934_000_000
 TOKIO_POST_SPLIT_ISSUED = 29_010_000_000
 TOKIO_METRIC_VERSION = 1
 TOKIO_HIST_DIV_SOURCE = "https://www.tokiomarinehd.com/en/ir/download/Integrated_Report_2026_Print_e.pdf"
+TOKIO_HIST_PE_OBSERVATIONS = ((2021, 11.62), (2022, 13.66), (2023, 13.38), (2024, 10.58), (2025, 14.18))
+TOKIO_HIST_PE_MEAN = round(math.fsum(pe for _, pe in TOKIO_HIST_PE_OBSERVATIONS) / len(TOKIO_HIST_PE_OBSERVATIONS), 6)
 TOKYO = ZoneInfo("Asia/Tokyo")
+
+
+def tokio_historical_pe_metadata() -> dict[str, Any]:
+    """Audited issuer year-end PER series; distinct from the current IFRS ratios."""
+    return dict(
+        provider="Tokio Marine IR", fact_type="historical_year_end_pe_mean",
+        label="Hist. KGV 5J", accounting_basis="J-GAAP", period="FY2021–FY2025",
+        source_url=TOKIO_HIST_DIV_SOURCE + "#page=75", source_page=75,
+        source_printed_page=74, verified_at="2026-10-22", sample_count=len(TOKIO_HIST_PE_OBSERVATIONS),
+        observations=[dict(fiscal_year=fy, pe=pe) for fy, pe in TOKIO_HIST_PE_OBSERVATIONS],
+        method=("Arithmetisches Mittel der fünf vom Emittenten veröffentlichten Jahresend-KGVs "
+                "FY2021–FY2025: (11,62 + 13,66 + 13,38 + 10,58 + 14,18) ÷ 5 = 12,684×. "
+                "J-GAAP; kein Durchschnitt täglicher KGVs und keine Neuberechnung aus gerundeten EPS. "
+                "Laut Berichtsfußnote wenden ausländische IFRS-Tochtergesellschaften seit FY2023 IFRS 17 "
+                "an; betroffene FY2022-Angaben sind rückwirkend angepasst. Die KGV-Verhältnisse sind "
+                "bei einheitlicher Kurs-/EPS-Basis unabhängig von Aktiensplits."),
+        comparable_to_current=False,
+        comparison_note="Aktuelles KGV: IFRS; historische Referenz: J-GAAP. Methodenwechsel; kein direkter Bewertungsaufschlag ableitbar.")
 
 
 def reference(name: str, ticker: str, cluster: str, hist_pe: float | None,
@@ -101,7 +122,7 @@ PORTFOLIOS = [
         reference("Hannover Rück", "HNR1.DE", REINSURANCE, 14.3, "Forward P/E < 11,5x & Div.-Rendite > 4,5%", 11.7, 11.2, hist_div=4.2, div_yield=4.6, roe=22.0),
         reference("MS&AD Insurance", "8725.T", ASIA, 9.0, "Forward P/E < 10,5x oder Div.-Rendite > 3,6%", 8.8, 12.3, hist_div=3.5, div_yield=3.2, roe=17.5),
         reference("Allianz", "ALV.DE", EU_INSURANCE, 12.5, "Forward P/E < 11,5x oder Div.-Rendite > 5,5%", 13.9, 12.4, hist_div=5.2, div_yield=5.2, roe=16.0),
-        reference("Tokio Marine", "8766.T", ASIA, None, "Rücksetzer auf Forward P/E 12x–13x abwarten", None, None, hist_div=3.220123649, div_yield=None, roe=None),
+        reference("Tokio Marine", "8766.T", ASIA, TOKIO_HIST_PE_MEAN, "Rücksetzer auf Forward P/E 12x–13x abwarten", None, None, hist_div=3.220123649, div_yield=None, roe=None),
         reference("DBS Group Holdings", "D05.SI", ASIA, 11.8, "Disziplin: Warten auf Forward P/E < 12,5x", 17.8, 16.6, hist_div=4.9, div_yield=4.3, roe=16.2),
         reference("Swiss Life", "SLHN.SW", EU_INSURANCE, 14.2, "Forward P/E < 14,5x oder Div.-Rendite > 5,2%", 19.5, 17.2, hist_div=5.1, div_yield=4.8, roe=15.0),
         dict(name="JPMorgan Nasdaq Equity Premium Income ETF", ticker="JEPQ",
@@ -150,7 +171,8 @@ def add_derived(stock: dict[str, Any], portfolio_id: str) -> None:
     raw = finite_number(stock.get("current_pe"))
     stock["chart_pe"] = 260.0 if raw is not None and stock["ticker"] in CHART_CAPPED_TICKERS and (raw < 0 or raw > 280) else raw
     hist_pe = finite_number(stock.get("hist_pe"))
-    spread = finite_number((raw / hist_pe - 1) * 100) if raw is not None and raw > 0 and hist_pe is not None and hist_pe > 0 else None
+    comparable = stock.get("field_metadata", {}).get("hist_pe", {}).get("comparable_to_current") is not False
+    spread = finite_number((raw / hist_pe - 1) * 100) if comparable and raw is not None and raw > 0 and hist_pe is not None and hist_pe > 0 else None
     stock["spread_pe_pct"] = round(spread, 4) if spread is not None else None
     price, sma = stock.get("price"), stock.get("sma200")
     distance = finite_number((price / sma - 1) * 100) if price and sma else None
@@ -190,10 +212,10 @@ def build_seed_data(now: datetime | None = None) -> dict[str, Any]:
             stock["field_sources"]["currency"] = "unavailable"
             stock["field_updated_at"]["currency"] = None
             if stock["ticker"] == TOKIO_TICKER:
-                # Fixed references have their own explicit period and basis;
-                # the former JGAAP/unspecified historical KGV is ineligible.
+                # Verified year-end references retain their own explicit period
+                # and basis; the J-GAAP KGV series is not comparable to IFRS.
                 stock["field_metadata"] = {
-                    "hist_pe": {"unavailable_reason": "Keine vergleichbare 5J-IFRS-Historie"},
+                    "hist_pe": tokio_historical_pe_metadata(),
                     "hist_div": dict(provider="Tokio Marine IR", label="Dividendenreferenz 5J",
                                      period="FY2021–FY2025", verified_at="2026-10-22",
                                      source_url=TOKIO_HIST_DIV_SOURCE,
@@ -449,7 +471,10 @@ def apply_tokio_issuer_metrics(stock: dict[str, Any], previous: dict[str, Any], 
     fresh_facts = payload.get("issuer_metrics") or {}
     prior_facts = previous.get("field_metadata") or {}
     metadata = stock.setdefault("field_metadata", {})
-    stock["hist_pe"] = None
+    # Reapply the audited reference rather than copying former null/initial
+    # values or allowing a provider payload to replace this separate series.
+    stock["hist_pe"] = TOKIO_HIST_PE_MEAN
+    metadata["hist_pe"] = tokio_historical_pe_metadata()
     stock["ps_ratio"] = None
     stock["field_sources"]["ps_ratio"] = "unavailable"
     stock["field_updated_at"]["ps_ratio"] = None
