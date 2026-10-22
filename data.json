@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "last_updated": "22.10.2026, 16:10 CEST",
-  "updated_at": "2026-10-22T16:10:53+02:00",
-  "last_attempted_at": "2026-10-22T16:10:53+02:00",
+  "last_updated": "22.10.2026, 17:01 CEST",
+  "updated_at": "2026-10-22T17:01:30+02:00",
+  "last_attempted_at": "2026-10-22T17:01:30+02:00",
   "data_mode": "partial",
   "expected_stock_count": 25,
   "warnings": [
-    "Historische Multiples, Dividendenreferenzen und Nachkauf-Indikatoren sind vorgegebene, nicht unabhängig geprüfte Referenzwerte; der 5J/10J-Zeitraum ist nicht je Aktie belegt. Tranchen folgen nur den Forward-KGV-Schwellen.",
+    "Historische Multiples, Dividendenreferenzen und Nachkauf-Indikatoren sind vorgegebene, nicht unabhängig geprüfte Referenzwerte, sofern nicht separat belegt; der 5J/10J-Zeitraum ist nicht je Aktie belegt. Tranchen folgen nur den Forward-KGV-Schwellen.",
     "Der Abruf ist teilweise erfolgreich; Fallbacks und fehlende Felder sind je Aktie ausgewiesen."
   ],
   "portfolios": [
@@ -1075,7 +1075,7 @@
           "name": "Tokio Marine",
           "ticker": "8766.T",
           "cluster": "Asien & Japan Finanzen",
-          "hist_pe": null,
+          "hist_pe": 12.684,
           "hist_ps": null,
           "hist_div": 3.220123649,
           "buy_trigger": "Rücksetzer auf Forward P/E 12x–13x abwarten",
@@ -1115,7 +1115,41 @@
           "warnings": [],
           "field_metadata": {
             "hist_pe": {
-              "unavailable_reason": "Keine vergleichbare 5J-IFRS-Historie"
+              "provider": "Tokio Marine IR",
+              "fact_type": "historical_year_end_pe_mean",
+              "label": "Hist. KGV 5J",
+              "accounting_basis": "J-GAAP",
+              "period": "FY2021–FY2025",
+              "source_url": "https://www.tokiomarinehd.com/en/ir/download/Integrated_Report_2026_Print_e.pdf#page=75",
+              "source_page": 75,
+              "source_printed_page": 74,
+              "verified_at": "2026-10-22",
+              "sample_count": 5,
+              "observations": [
+                {
+                  "fiscal_year": 2021,
+                  "pe": 11.62
+                },
+                {
+                  "fiscal_year": 2022,
+                  "pe": 13.66
+                },
+                {
+                  "fiscal_year": 2023,
+                  "pe": 13.38
+                },
+                {
+                  "fiscal_year": 2024,
+                  "pe": 10.58
+                },
+                {
+                  "fiscal_year": 2025,
+                  "pe": 14.18
+                }
+              ],
+              "method": "Arithmetisches Mittel der fünf vom Emittenten veröffentlichten Jahresend-KGVs FY2021–FY2025: (11,62 + 13,66 + 13,38 + 10,58 + 14,18) ÷ 5 = 12,684×. J-GAAP; kein Durchschnitt täglicher KGVs und keine Neuberechnung aus gerundeten EPS. Laut Berichtsfußnote wenden ausländische IFRS-Tochtergesellschaften seit FY2023 IFRS 17 an; betroffene FY2022-Angaben sind rückwirkend angepasst. Die KGV-Verhältnisse sind bei einheitlicher Kurs-/EPS-Basis unabhängig von Aktiensplits.",
+              "comparable_to_current": false,
+              "comparison_note": "Aktuelles KGV: IFRS; historische Referenz: J-GAAP. Methodenwechsel; kein direkter Bewertungsaufschlag ableitbar."
             },
             "hist_div": {
               "provider": "Tokio Marine IR",
