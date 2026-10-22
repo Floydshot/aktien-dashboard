@@ -199,10 +199,15 @@
       return meta.unavailable_reason || meta.provider === 'Tokio Marine IR' && (url.startsWith('https://www.tokiomarinehd.com/') || url.startsWith('https://www2.jpx.co.jp/disc/87660/')) ? meta : null;
     }
     function metricLabel(stock, field, fallback) { const meta = issuerMetric(stock, field); return meta && meta.label ? meta.label : fallback; }
+    function comparableHistoricalPE(stock) {
+      const meta = issuerMetric(stock, 'hist_pe');
+      return positive(stock.current_pe) !== null && positive(stock.hist_pe) !== null && (!meta || meta.comparable_to_current !== false);
+    }
     function fieldSourceText(stock, field) {
       const status = source(stock, field);
       const meta = issuerMetric(stock, field);
       if (meta && meta.unavailable_reason) return field === 'hist_pe' ? 'nicht vergleichbar' : 'nicht verfügbar';
+      if (meta && meta.verified_at && field === 'hist_pe') return 'J-GAAP · IR';
       if (meta && meta.verified_at && field === 'hist_div') return 'IR-Referenz';
       return meta && ['live', 'previous'].includes(status) || field === 'div_yield' && dividendForecast(stock) ? status === 'previous' ? 'IR-Vorwert' : 'Tokio Marine IR' : sourceText[status];
     }
@@ -266,7 +271,7 @@
     function renderSummary() {
       const data = state.visible, forward = data.map(stock => positive(stock.forward_pe)).filter(value => value !== null).sort((a, b) => a - b);
       const median = forward.length ? (forward[Math.floor((forward.length - 1) / 2)] + forward[Math.ceil((forward.length - 1) / 2)]) / 2 : null;
-      const eligible = data.filter(stock => positive(stock.current_pe) !== null && positive(stock.hist_pe) !== null);
+      const eligible = data.filter(comparableHistoricalPE);
       const below = eligible.filter(stock => stock.current_pe < stock.hist_pe).length;
       const buys = data.filter(stock => trancheKey(stock) === 'buy').length;
       const values = [ ['Werte im Vergleich', data.length, '/ ' + portfolio().stocks.length, state.cluster === 'Alle' ? 'Gesamtes Portfolio' : state.cluster], ['Tranche 1 · Forward-Regel', buys, 'Aktien', state.portfolio === 'tech' ? 'Forward P/E < 24,0×' : 'Forward P/E ≤ 11,3×'], ['Median Forward P/E', median === null ? '—' : fmt(median) + '×', '', forward.length + ' verfügbare Schätzungen'], ['KGV unter hist. Referenz', below, '/ ' + eligible.length, 'Vergleich mit Vorgabe (5J/10J)'] ];
@@ -312,7 +317,7 @@
           card.append(metrics, el('p', 'fund-note', 'Ausschüttungen der letzten 12 Monate ÷ aktueller Kurs. Fonds-KGV: Bewertung der enthaltenen Aktien; keine historische Referenz hinterlegt.'));
         } else {
           metrics.append(metricCell(stock, 'TTM P/E', peText(stock.current_pe), 'current_pe'), metricCell(stock, 'Hist. P/E', peText(stock.hist_pe), 'hist_pe', true), metricCell(stock, 'Forward P/E', peText(stock.forward_pe), 'forward_pe', false, true), state.portfolio === 'tech' ? metricCell(stock, 'P/S', number(stock.ps_ratio) === null ? '—' : fmt(stock.ps_ratio) + '×', 'ps_ratio') : metricCell(stock, dividendForecast(stock) ? 'Div. (Prognose)' : 'Div.-Rendite', percent(stock.div_yield), 'div_yield')); card.append(metrics);
-          const valuation = el('div', 'valuation-row'); const spread = positive(stock.current_pe) !== null && positive(stock.hist_pe) !== null ? (Number(stock.current_pe) / Number(stock.hist_pe) - 1) * 100 : null; const spreadNode = el('span', 'spread' + (spread === null ? '' : spread < 0 ? ' discount' : ' premium'), spread === null ? stock.ticker === '8766.T' ? 'Keine 5J-IFRS-Historie' : 'P/E-Abstand nicht verfügbar' : signedPercent(spread) + ' TTM vs. Referenz'); spreadNode.title = stock.ticker === '8766.T' ? 'Kein historischer KGV-Vergleich wegen fehlender vergleichbarer IFRS-Historie.' : 'Vergleich des TTM-P/E mit der festen historischen Nutzervorgabe; kein Kurspotenzial.'; valuation.append(spreadNode);
+          const valuation = el('div', 'valuation-row'), historical = issuerMetric(stock, 'hist_pe'); const spread = comparableHistoricalPE(stock) ? (Number(stock.current_pe) / Number(stock.hist_pe) - 1) * 100 : null; const methodsDiffer = historical && historical.comparable_to_current === false; const spreadNode = el('span', 'spread' + (spread === null ? '' : spread < 0 ? ' discount' : ' premium'), methodsDiffer ? 'IFRS / J-GAAP' : spread === null ? 'P/E-Abstand nicht verfügbar' : signedPercent(spread) + ' TTM vs. Referenz'); spreadNode.title = methodsDiffer ? historical.comparison_note || 'Aktuelles IFRS-KGV und historische J-GAAP-Referenz sind nur eingeschränkt vergleichbar; kein direkter Bewertungsaufschlag.' : 'Vergleich des TTM-P/E mit der festen historischen Nutzervorgabe; kein Kurspotenzial.'; valuation.append(spreadNode);
           const companion = state.portfolio === 'tech' ? 'Hist. P/S ' + (number(stock.hist_ps) === null ? '—' : fmt(stock.hist_ps) + '×') : metricLabel(stock, 'roe', 'ROE') + ' ' + percent(stock.roe); const companionNode = el('span', '', companion); companionNode.title = state.portfolio === 'tech' ? 'Feste Nutzervorgabe (5J/10J)' : provenance(stock, 'roe'); if (state.portfolio === 'value') companionNode.append(el('span', 'technical-source', '· ' + fieldSourceText(stock, 'roe'))); valuation.append(companionNode); card.append(valuation);
         }
         const trigger = el('div', 'trigger'); trigger.append(el('span', 'trigger-label', etf ? 'ETF-Einordnung' : 'Persönlicher Nachkauf-Indikator'), el('span', 'trigger-text', stock.buy_trigger || 'Kein individueller Indikator hinterlegt')); card.append(trigger);
@@ -346,7 +351,7 @@
     function renderChart() {
       const colors = chartPalette(), series = chartSeries(colors), legend = $('legend'); legend.replaceChildren();
       const notes = ['Historische Referenzen: Nutzervorgaben (5J/10J), sofern nicht separat belegt.'];
-      if (state.visible.some(stock => stock.ticker === '8766.T')) notes.push('Tokio Marine: KGV mit ausgewiesenem IFRS-Geschäftsjahr; keine vergleichbare 5J-KGV-Historie.');
+      if (state.visible.some(stock => stock.ticker === '8766.T')) notes.push('Tokio Marine: 5J-Referenz = Mittel der Jahresend-KGVs FY2021–FY2025 (J-GAAP); aktuelle KGVs nach IFRS, daher nur eingeschränkt vergleichbar.');
       if (state.visible.some(isETF)) notes.push('JEPQ: Fonds-KGV und Ausschüttungen (12M), ohne historische Referenz.');
       document.querySelector('.chart-note span').textContent = notes.join(' ');
       series.forEach(s => { const item = el('li'), swatch = el('span', 'legend-swatch'); swatch.style.backgroundColor = s.color; item.append(swatch, document.createTextNode(s.label)); legend.append(item); });
