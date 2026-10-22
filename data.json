@@ -17,7 +17,7 @@
         {
           "name": "Alphabet",
           "ticker": "GOOGL",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Big Tech",
           "hist_pe": 24.3,
           "hist_ps": 6.2,
           "hist_div": null,
@@ -66,7 +66,7 @@
         {
           "name": "Meta",
           "ticker": "META",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Big Tech",
           "hist_pe": 25.9,
           "hist_ps": 7.8,
           "hist_div": null,
@@ -115,7 +115,7 @@
         {
           "name": "Broadcom",
           "ticker": "AVGO",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Big Tech",
           "hist_pe": 65.7,
           "hist_ps": 8.1,
           "hist_div": null,
@@ -164,7 +164,7 @@
         {
           "name": "Amazon",
           "ticker": "AMZN",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Big Tech",
           "hist_pe": 63.0,
           "hist_ps": 3.5,
           "hist_div": null,
@@ -213,7 +213,7 @@
         {
           "name": "Nvidia",
           "ticker": "NVDA",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Semiconducter",
           "hist_pe": 54.9,
           "hist_ps": 20.5,
           "hist_div": null,
@@ -264,7 +264,7 @@
         {
           "name": "Microsoft",
           "ticker": "MSFT",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Big Tech",
           "hist_pe": 33.0,
           "hist_ps": 11.2,
           "hist_div": null,
@@ -313,7 +313,7 @@
         {
           "name": "ServiceNow",
           "ticker": "NOW",
-          "cluster": "High-Growth SaaS & Cyber",
+          "cluster": "SaaS",
           "hist_pe": 147.5,
           "hist_ps": 15.8,
           "hist_div": null,
@@ -362,7 +362,7 @@
         {
           "name": "Apple",
           "ticker": "AAPL",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Big Tech",
           "hist_pe": 33.0,
           "hist_ps": 7.4,
           "hist_div": null,
@@ -411,7 +411,7 @@
         {
           "name": "AMD",
           "ticker": "AMD",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Semiconducter",
           "hist_pe": 134.5,
           "hist_ps": 8.5,
           "hist_div": null,
@@ -460,7 +460,7 @@
         {
           "name": "Arista Networks",
           "ticker": "ANET",
-          "cluster": "Big Tech & Halbleiter",
+          "cluster": "Semiconducter",
           "hist_pe": 46.5,
           "hist_ps": 14.5,
           "hist_div": null,
@@ -509,7 +509,7 @@
         {
           "name": "Palo Alto Networks",
           "ticker": "PANW",
-          "cluster": "High-Growth SaaS & Cyber",
+          "cluster": "Cybersecurity",
           "hist_pe": 173.8,
           "hist_ps": 11.5,
           "hist_div": null,
@@ -560,7 +560,7 @@
         {
           "name": "CrowdStrike",
           "ticker": "CRWD",
-          "cluster": "High-Growth SaaS & Cyber",
+          "cluster": "Cybersecurity",
           "hist_pe": 200.0,
           "hist_ps": 27.1,
           "hist_div": null,
@@ -611,7 +611,7 @@
         {
           "name": "Cloudflare",
           "ticker": "NET",
-          "cluster": "High-Growth SaaS & Cyber",
+          "cluster": "Cybersecurity",
           "hist_pe": 210.0,
           "hist_ps": 31.1,
           "hist_div": null,
@@ -659,6 +659,12 @@
           "tranche_color": "amber",
           "tranche_key": "watch"
         }
+      ],
+      "cluster_order": [
+        "Big Tech",
+        "Semiconducter",
+        "Cybersecurity",
+        "SaaS"
       ]
     },
     {
@@ -1271,6 +1277,12 @@
           "tranche_color": "slate",
           "tranche_key": "unavailable"
         }
+      ],
+      "cluster_order": [
+        "Erstversicherer Europa",
+        "Rückversicherer",
+        "Asien & Japan Finanzen",
+        "Income-ETFs"
       ]
     }
   ],
