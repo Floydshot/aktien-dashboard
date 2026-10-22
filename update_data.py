@@ -53,28 +53,31 @@ def reference(name: str, ticker: str, cluster: str, hist_pe: float,
                              ps_ratio=ps_ratio, div_yield=div_yield, roe=roe))
 
 
-BIG_TECH = "Big Tech & Halbleiter"
-SAAS = "High-Growth SaaS & Cyber"
+BIG_TECH = "Big Tech"
+SEMICONDUCTOR = "Semiconducter"
+CYBERSECURITY = "Cybersecurity"
+SAAS = "SaaS"
+CHART_CAPPED_TICKERS = frozenset({"NOW", "PANW", "CRWD", "NET"})
 EU_INSURANCE = "Erstversicherer Europa"
 ASIA = "Asien & Japan Finanzen"
 REINSURANCE = "Rückversicherer"
 PORTFOLIOS = [
-    dict(id="tech", name="Tech Stonks", stocks=[
+    dict(id="tech", name="Tech Stonks", cluster_order=[BIG_TECH, SEMICONDUCTOR, CYBERSECURITY, SAAS], stocks=[
         reference("Alphabet", "GOOGL", BIG_TECH, 24.3, "Forward P/E < 17x oder Wochen-EMA 50", 16.9, 16.8, hist_ps=6.2, ps_ratio=6.5),
         reference("Meta", "META", BIG_TECH, 25.9, "Forward P/E 18x–19x & Tages-RSI < 40", 27.7, 19.7, hist_ps=7.8, ps_ratio=9.2),
         reference("Broadcom", "AVGO", BIG_TECH, 65.7, "Forward P/E 19x–21x oder Tages-SMA 100/200", 41.4, 21.0, hist_ps=8.1, ps_ratio=18.3),
         reference("Amazon", "AMZN", BIG_TECH, 63.0, "Forward P/E < 24x oder P/OCF < 18x", 21.1, 23.6, hist_ps=3.5, ps_ratio=3.8),
-        reference("Nvidia", "NVDA", BIG_TECH, 54.9, "Forward P/E 22x–24x oder Tages-SMA 200", 27.4, 24.9, hist_ps=20.5, ps_ratio=24.0),
+        reference("Nvidia", "NVDA", SEMICONDUCTOR, 54.9, "Forward P/E 22x–24x oder Tages-SMA 200", 27.4, 24.9, hist_ps=20.5, ps_ratio=24.0),
         reference("Microsoft", "MSFT", BIG_TECH, 33.0, "Forward P/E 23x–24x oder Test SMA 200", 29.6, 25.1, hist_ps=11.2, ps_ratio=13.5),
         reference("ServiceNow", "NOW", SAAS, 147.5, "Forward P/E < 28x oder P/FCF < 30x", 87.5, 27.8, hist_ps=15.8, ps_ratio=16.5),
         reference("Apple", "AAPL", BIG_TECH, 33.0, "Abwarten auf Forward P/E < 28x", 39.3, 35.2, hist_ps=7.4, ps_ratio=9.8),
-        reference("AMD", "AMD", BIG_TECH, 134.5, "Forward P/E 28x–32x oder Wochen-SMA 50", 137.1, 39.5, hist_ps=8.5, ps_ratio=11.5),
-        reference("Arista Networks", "ANET", BIG_TECH, 46.5, "Rücksetzer auf Forward P/E < 38x–40x", 67.9, 48.5, hist_ps=14.5, ps_ratio=22.0),
-        reference("Palo Alto Networks", "PANW", SAAS, 173.8, "EV/FCF < 30x–32x (Earnings-Dip nutzen)", 271.9, 93.5, hist_ps=11.5, ps_ratio=18.2),
-        reference("CrowdStrike", "CRWD", SAAS, 200.0, "Strikte Disziplin: P/S < 25x oder P/FCF < 35x", 250.0, 208.3, hist_ps=27.1, ps_ratio=43.2),
-        reference("Cloudflare", "NET", SAAS, 210.0, "Kompression auf P/S 20x–25x abwarten", 260.0, 226.9, hist_ps=31.1, ps_ratio=41.7),
+        reference("AMD", "AMD", SEMICONDUCTOR, 134.5, "Forward P/E 28x–32x oder Wochen-SMA 50", 137.1, 39.5, hist_ps=8.5, ps_ratio=11.5),
+        reference("Arista Networks", "ANET", SEMICONDUCTOR, 46.5, "Rücksetzer auf Forward P/E < 38x–40x", 67.9, 48.5, hist_ps=14.5, ps_ratio=22.0),
+        reference("Palo Alto Networks", "PANW", CYBERSECURITY, 173.8, "EV/FCF < 30x–32x (Earnings-Dip nutzen)", 271.9, 93.5, hist_ps=11.5, ps_ratio=18.2),
+        reference("CrowdStrike", "CRWD", CYBERSECURITY, 200.0, "Strikte Disziplin: P/S < 25x oder P/FCF < 35x", 250.0, 208.3, hist_ps=27.1, ps_ratio=43.2),
+        reference("Cloudflare", "NET", CYBERSECURITY, 210.0, "Kompression auf P/S 20x–25x abwarten", 260.0, 226.9, hist_ps=31.1, ps_ratio=41.7),
     ]),
-    dict(id="value", name="Value Stonks", stocks=[
+    dict(id="value", name="Value Stonks", cluster_order=[EU_INSURANCE, REINSURANCE, ASIA, "Income-ETFs"], stocks=[
         reference("AXA SA", "CS.PA", EU_INSURANCE, 11.2, "Forward P/E < 9,5x & Div.-Rendite > 5,7%", 8.5, 8.3, hist_div=5.4, div_yield=6.0, roe=15.0),
         reference("Sompo Holdings", "8630.T", ASIA, 11.5, "Forward P/E < 10x oder P/B < 1,25x", 8.9, 9.5, hist_div=3.1, div_yield=3.4, roe=14.0),
         reference("Zurich Insurance", "ZURN.SW", EU_INSURANCE, 14.9, "P/E < 11,5x & Div.-Rendite > 5,0%", 9.0, 9.8, hist_div=5.1, div_yield=5.2, roe=36.0),
@@ -130,7 +133,7 @@ def tranche_for(portfolio_id: str, forward_pe: Any) -> tuple[str, str, str]:
 
 def add_derived(stock: dict[str, Any], portfolio_id: str) -> None:
     raw = finite_number(stock.get("current_pe"))
-    stock["chart_pe"] = 260.0 if raw is not None and stock["cluster"] == SAAS and (raw < 0 or raw > 280) else raw
+    stock["chart_pe"] = 260.0 if raw is not None and stock["ticker"] in CHART_CAPPED_TICKERS and (raw < 0 or raw > 280) else raw
     hist_pe = finite_number(stock.get("hist_pe"))
     spread = finite_number((raw / hist_pe - 1) * 100) if raw is not None and raw > 0 and hist_pe is not None and hist_pe > 0 else None
     stock["spread_pe_pct"] = round(spread, 4) if spread is not None else None
@@ -158,7 +161,7 @@ def build_seed_data(now: datetime | None = None) -> dict[str, Any]:
                   expected_stock_count=EXPECTED_STOCK_COUNT,
                   warnings=[INITIAL_WARNING, REFERENCE_WARNING], portfolios=[])
     for portfolio in PORTFOLIOS:
-        group = dict(id=portfolio["id"], name=portfolio["name"], stocks=[])
+        group = dict(id=portfolio["id"], name=portfolio["name"], cluster_order=list(portfolio["cluster_order"]), stocks=[])
         for ref in portfolio["stocks"]:
             stock = {key: value for key, value in ref.items() if key != "initial"}
             stock.update({field: ref["initial"].get(field) for field in NUMERIC_FIELDS})
