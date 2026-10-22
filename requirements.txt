@@ -1,0 +1,4 @@
+# Python 3.11+; reviewed against the current upstream releases.
+yfinance==1.7.0
+pandas==3.0.6
+pytz==2026.5
