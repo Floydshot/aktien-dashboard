@@ -5,8 +5,9 @@ Run ``python update_data.py`` for Yahoo Finance data, or add ``--seed`` for
 the exact supplied starting values without any network or third-party import.
 Historical multiples and buy_trigger strings below are user-supplied fixed
 references, not independently verified five/ten-year historical calculations.
-Tranches implement the requested forward-P/E thresholds, not the free-text
-company-specific triggers. All missing prices/technicals remain JSON null.
+Stock tranches implement the requested forward-P/E thresholds, not the free-text
+company-specific triggers. ETFs are assessed separately without stock thresholds.
+All missing prices/technicals remain JSON null.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ from zoneinfo import ZoneInfo
 
 
 BERLIN = ZoneInfo("Europe/Berlin")
-EXPECTED_STOCK_COUNT = 24
 REFERENCE_WARNING = (
     "Historische Multiples, Dividendenreferenzen und Nachkauf-Indikatoren sind "
     "vorgegebene, nicht unabhängig geprüfte Referenzwerte; der 5J/10J-Zeitraum "
@@ -38,6 +38,8 @@ NUMERIC_FIELDS = (
     "current_pe", "forward_pe", "ps_ratio", "div_yield", "roe", "price",
     "sma200", "rsi14",
 )
+ETF_NUMERIC_FIELDS = ("distribution_yield_ttm", "distributions_per_share_ttm")
+ETF_SOURCE = "https://am.jpmorgan.com/content/dam/jpm-am-aem/americas/us/en/literature/fact-sheet/etfs/FS-JEPQ.PDF"
 
 
 def reference(name: str, ticker: str, cluster: str, hist_pe: float,
@@ -57,7 +59,7 @@ EU_INSURANCE = "Erstversicherer Europa"
 ASIA = "Asien & Japan Finanzen"
 REINSURANCE = "Rückversicherer"
 PORTFOLIOS = [
-    dict(id="tech", name="Tech & Growth", stocks=[
+    dict(id="tech", name="Tech Stonks", stocks=[
         reference("Alphabet", "GOOGL", BIG_TECH, 24.3, "Forward P/E < 17x oder Wochen-EMA 50", 16.9, 16.8, hist_ps=6.2, ps_ratio=6.5),
         reference("Meta", "META", BIG_TECH, 25.9, "Forward P/E 18x–19x & Tages-RSI < 40", 27.7, 19.7, hist_ps=7.8, ps_ratio=9.2),
         reference("Broadcom", "AVGO", BIG_TECH, 65.7, "Forward P/E 19x–21x oder Tages-SMA 100/200", 41.4, 21.0, hist_ps=8.1, ps_ratio=18.3),
@@ -72,7 +74,7 @@ PORTFOLIOS = [
         reference("CrowdStrike", "CRWD", SAAS, 200.0, "Strikte Disziplin: P/S < 25x oder P/FCF < 35x", 250.0, 208.3, hist_ps=27.1, ps_ratio=43.2),
         reference("Cloudflare", "NET", SAAS, 210.0, "Kompression auf P/S 20x–25x abwarten", 260.0, 226.9, hist_ps=31.1, ps_ratio=41.7),
     ]),
-    dict(id="value", name="Value & Finanzen", stocks=[
+    dict(id="value", name="Value Stonks", stocks=[
         reference("AXA SA", "CS.PA", EU_INSURANCE, 11.2, "Forward P/E < 9,5x & Div.-Rendite > 5,7%", 8.5, 8.3, hist_div=5.4, div_yield=6.0, roe=15.0),
         reference("Sompo Holdings", "8630.T", ASIA, 11.5, "Forward P/E < 10x oder P/B < 1,25x", 8.9, 9.5, hist_div=3.1, div_yield=3.4, roe=14.0),
         reference("Zurich Insurance", "ZURN.SW", EU_INSURANCE, 14.9, "P/E < 11,5x & Div.-Rendite > 5,0%", 9.0, 9.8, hist_div=5.1, div_yield=5.2, roe=36.0),
@@ -84,8 +86,18 @@ PORTFOLIOS = [
         reference("Tokio Marine", "8766.T", ASIA, 12.6, "Rücksetzer auf Forward P/E 12x–13x abwarten", 18.3, 15.4, hist_div=3.2, div_yield=2.7, roe=13.0),
         reference("DBS Group Holdings", "D05.SI", ASIA, 11.8, "Disziplin: Warten auf Forward P/E < 12,5x", 17.8, 16.6, hist_div=4.9, div_yield=4.3, roe=16.2),
         reference("Swiss Life", "SLHN.SW", EU_INSURANCE, 14.2, "Forward P/E < 14,5x oder Div.-Rendite > 5,2%", 19.5, 17.2, hist_div=5.1, div_yield=4.8, roe=15.0),
+        dict(name="JPMorgan Nasdaq Equity Premium Income ETF", ticker="JEPQ",
+             cluster="Income-ETFs", asset_type="etf", fund_kind="equity_income_options",
+             fund_inception="2022-05-03", fund_source=ETF_SOURCE,
+             hist_pe=None, hist_ps=None, hist_div=None,
+             buy_trigger="ETF separat bewerten; kein automatisches Kaufsignal.",
+             distribution_yield_label="Ausschüttungsrendite (12M)",
+             distribution_yield_method="Ausschüttungen je Anteil der letzten 12 Monate nach Ex-Tag / aktueller Kurs × 100; keine Gesamtrendite.",
+             initial={}),
     ]),
 ]
+EXPECTED_STOCK_COUNT = sum(len(group["stocks"]) for group in PORTFOLIOS)
+ETF_TICKERS = frozenset(stock["ticker"] for group in PORTFOLIOS for stock in group["stocks"] if stock.get("asset_type") == "etf")
 
 
 def finite_number(value: Any) -> float | None:
@@ -119,11 +131,15 @@ def tranche_for(portfolio_id: str, forward_pe: Any) -> tuple[str, str, str]:
 def add_derived(stock: dict[str, Any], portfolio_id: str) -> None:
     raw = finite_number(stock.get("current_pe"))
     stock["chart_pe"] = 260.0 if raw is not None and stock["cluster"] == SAAS and (raw < 0 or raw > 280) else raw
-    spread = finite_number((raw / stock["hist_pe"] - 1) * 100) if raw is not None and raw > 0 else None
+    hist_pe = finite_number(stock.get("hist_pe"))
+    spread = finite_number((raw / hist_pe - 1) * 100) if raw is not None and raw > 0 and hist_pe is not None and hist_pe > 0 else None
     stock["spread_pe_pct"] = round(spread, 4) if spread is not None else None
     price, sma = stock.get("price"), stock.get("sma200")
     distance = finite_number((price / sma - 1) * 100) if price and sma else None
     stock["sma200_distance_pct"] = round(distance, 4) if distance is not None else None
+    if stock.get("asset_type") == "etf":
+        stock["tranche"], stock["tranche_color"], stock["tranche_key"] = "ETF · separat bewerten", "slate", "unavailable"
+        return
     stock["tranche"], stock["tranche_color"], stock["tranche_key"] = tranche_for(portfolio_id, stock.get("forward_pe"))
     if raw is not None and raw <= 0:
         stock["warnings"].append("TTM-KGV ist nicht positiv; ein Bewertungsabschlag ist nicht sinnvoll interpretierbar.")
@@ -151,6 +167,12 @@ def build_seed_data(now: datetime | None = None) -> dict[str, Any]:
                          field_updated_at={field: None for field in NUMERIC_FIELDS}, warnings=[INITIAL_WARNING])
             stock["field_sources"]["currency"] = "unavailable"
             stock["field_updated_at"]["currency"] = None
+            if stock.get("asset_type") == "etf":
+                for field in ETF_NUMERIC_FIELDS:
+                    stock[field] = None
+                    stock["field_sources"][field] = "unavailable"
+                    stock["field_updated_at"][field] = None
+                stock["distribution_as_of"] = None
             add_derived(stock, portfolio["id"])
             group["stocks"].append(stock)
         result["portfolios"].append(group)
@@ -242,6 +264,34 @@ def calculate_technicals(history: Any) -> tuple[dict[str, Any], list[str]]:
     return dict(sma200=sma, rsi14=rsi, history_price=float(close.iloc[-1]), history_as_of=as_of), notes
 
 
+def calculate_distributions(history: Any) -> tuple[dict[str, Any], list[str]]:
+    """Sum actual cash distributions over one complete rolling calendar year.
+
+    Yahoo calls ETF distributions "Dividends". They may include option income,
+    so the dashboard deliberately does not call this corporate dividend yield.
+    The open left boundary prevents counting 13 monthly payments when the same
+    calendar date occurs at both ends of the annual history.
+    """
+    import pandas as pd
+    if history is None or history.empty or "Dividends" not in history:
+        return {}, ["ETF-Ausschüttungshistorie fehlt; keine 12M-Rendite berechnet."]
+    history = history.sort_index()
+    history = history.loc[~history.index.duplicated(keep="last")]
+    if not isinstance(history.index, pd.DatetimeIndex):
+        return {}, ["ETF-Ausschüttungshistorie hat keine gültigen Tagesdaten."]
+    end = history.index[-1].normalize()
+    cutoff = end - pd.DateOffset(years=1)
+    # Trading-day sampling can begin a few days after the exact calendar cutoff.
+    if history.index[0].normalize() > cutoff + pd.Timedelta(days=5):
+        return {}, ["ETF-Ausschüttungshistorie deckt keine vollständigen 12 Monate ab."]
+    in_window = (history.index.normalize() > cutoff) & (history.index.normalize() <= end)
+    distributions = pd.to_numeric(history.loc[in_window, "Dividends"], errors="coerce")
+    if distributions.empty or not distributions.map(lambda value: finite_number(value) is not None and value >= 0).all():
+        return {}, ["ETF-Ausschüttungshistorie enthält ungültige Werte; keine 12M-Rendite berechnet."]
+    total = finite_number(distributions.sum())
+    return dict(distributions_per_share_ttm=total, distribution_as_of=end.date().isoformat()), []
+
+
 def _fetch_worker(ticker: str, pipe: Any, attempts: int) -> None:
     """Separate process gives even Ticker.info a hard overall time limit."""
     try:
@@ -258,8 +308,13 @@ def _fetch_worker(ticker: str, pipe: Any, attempts: int) -> None:
                         pipe.send(dict(info=info, info_retrieved_at=iso_now()))
                     else:
                         # Unadjusted Close shares the raw quote's price basis.
-                        history = security.history(period="1y", interval="1d", auto_adjust=False, actions=False, timeout=12)
+                        is_etf = ticker in ETF_TICKERS
+                        history = security.history(period="1y", interval="1d", auto_adjust=False, actions=is_etf, timeout=12)
                         technicals, notes = calculate_technicals(history)
+                        if is_etf:
+                            distributions, distribution_notes = calculate_distributions(history)
+                            technicals.update(distributions)
+                            notes.extend(distribution_notes)
                         pipe.send(dict(technicals=technicals, history_retrieved_at=iso_now(), warnings=notes))
                     break
                 except Exception as exc:
@@ -331,7 +386,8 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
     quote_price = next((value for key in ("currentPrice", "regularMarketPrice") if (value := finite_number(info.get(key))) is not None and value > 0), None)
     history_price = finite_number(technicals.get("history_price"))
     price = quote_price or history_price
-    dividend, dividend_warnings = normalize_dividend_yield(info, price)
+    is_etf = seed.get("asset_type") == "etf"
+    dividend, dividend_warnings = (None, []) if is_etf else normalize_dividend_yield(info, price)
     stock["warnings"].extend(dividend_warnings)
     roe = finite_number(info.get("returnOnEquity"))
     values = dict(current_pe=finite_number(info.get("trailingPE")), forward_pe=finite_number(info.get("forwardPE")),
@@ -339,7 +395,24 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
                   roe=finite_number(roe * 100) if roe is not None else None, price=price,
                   sma200=finite_number(technicals.get("sma200")), rsi14=finite_number(technicals.get("rsi14")),
                   currency=info.get("currency") if isinstance(info.get("currency"), str) and info["currency"].strip() else None)
-    for field in (*NUMERIC_FIELDS, "currency"):
+    fields = (*NUMERIC_FIELDS, "currency")
+    if is_etf:
+        # Funds have no company earnings forecast, ROE or sales valuation.
+        for field in ("forward_pe", "ps_ratio", "roe", "div_yield"):
+            stock[field] = values[field] = None
+            stock["field_sources"][field] = "unavailable"
+            stock["field_updated_at"][field] = None
+        if values["current_pe"] is not None and values["current_pe"] <= 0:
+            values["current_pe"] = None
+        distributions = finite_number(technicals.get("distributions_per_share_ttm"))
+        if distributions is not None and distributions < 0:
+            distributions = None
+        values["distributions_per_share_ttm"] = distributions
+        values["distribution_yield_ttm"] = finite_number(distributions / price * 100) if distributions is not None and price and price > 0 else None
+        fields = (*fields, *ETF_NUMERIC_FIELDS)
+    for field in fields:
+        if is_etf and field in {"forward_pe", "ps_ratio", "roe", "div_yield"}:
+            continue
         value = values[field]
         if field in {"price", "sma200"} and value is not None and value <= 0:
             value = None
@@ -352,8 +425,14 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
         else:
             stock[field] = round(value, 6) if field != "currency" else value
             stock["field_sources"][field] = "live"
-            history_field = field in {"sma200", "rsi14"} or (field == "price" and quote_price is None)
+            history_field = field in {"sma200", "rsi14", *ETF_NUMERIC_FIELDS} or (field == "price" and quote_price is None)
             stock["field_updated_at"][field] = payload.get("history_retrieved_at" if history_field else "info_retrieved_at") or stamp
+    if is_etf:
+        if stock.get("current_pe") is not None and stock["current_pe"] <= 0:
+            stock["current_pe"] = None
+            stock["field_sources"]["current_pe"] = "unavailable"
+            stock["field_updated_at"]["current_pe"] = None
+        stock["distribution_as_of"] = technicals.get("distribution_as_of") if stock["field_sources"]["distribution_yield_ttm"] == "live" else previous.get("distribution_as_of")
     quote_epoch = finite_number(info.get("regularMarketTime"))
     if quote_price and quote_epoch:
         try:
@@ -366,7 +445,7 @@ def merge_stock(seed: dict[str, Any], previous: dict[str, Any], payload: dict[st
         stock["as_of"] = previous.get("as_of")
     else:
         stock["as_of"] = None
-    required = ["current_pe", "forward_pe", "price", "sma200", "rsi14", "currency", *( ["ps_ratio"] if portfolio_id == "tech" else ["div_yield", "roe"])]
+    required = ["price", "sma200", "rsi14", "currency", "distribution_yield_ttm"] if is_etf else ["current_pe", "forward_pe", "price", "sma200", "rsi14", "currency", *( ["ps_ratio"] if portfolio_id == "tech" else ["div_yield", "roe"])]
     sources = [stock["field_sources"][field] for field in required]
     if all(source == "live" for source in sources):
         stock["source_status"] = "live"
@@ -462,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.seed:
             result = build_seed_data()
         else:
-            # Fail early on missing dependencies, rather than spawning 24 failures.
+            # Fail early on missing dependencies, rather than failing per holding.
             import pandas  # noqa: F401
             import pytz  # noqa: F401
             import yfinance  # noqa: F401
@@ -472,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, ImportError) as exc:
         print(f"Update fehlgeschlagen: {exc}", file=sys.stderr)
         return 1
-    print(f"{EXPECTED_STOCK_COUNT} Aktien → {args.output} | Modus: {result['data_mode']} | {result.get('status_counts', {'initial': EXPECTED_STOCK_COUNT})}")
+    print(f"{EXPECTED_STOCK_COUNT} Werte → {args.output} | Modus: {result['data_mode']} | {result.get('status_counts', {'initial': EXPECTED_STOCK_COUNT})}")
     return 1 if result["data_mode"] == "stale" else 0
 
 
